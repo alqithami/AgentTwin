@@ -1,0 +1,6 @@
+Comparison,Improvement (%),t-statistic,p-value,Effect Size,Significance
+Multi-Agent vs PID Cascade,21.4,3.82,< 0.001,Large,***
+Multi-Agent vs NMPC,13.0,2.91,0.008,Medium,**
+Multi-Agent vs Schedule-then-Control,17.2,3.45,0.002,Large,**
+With vs Without Safety Shield,65.0,5.23,< 0.001,Large,***
+With vs Without Coordination,28.5,4.17,< 0.001,Large,***
