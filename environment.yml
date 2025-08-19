@@ -1,0 +1,73 @@
+name: agenttwin
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  # Python (Apple Silicon compatible)
+  - python=3.11
+  
+  # Core scientific computing (Apple Silicon optimized)
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - pandas>=2.0.0
+  - matplotlib>=3.7.0
+  - seaborn>=0.12.0
+  
+  # Machine Learning (Apple Silicon optimized)
+  - pytorch>=2.0.0
+  - pytorch::pytorch
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - scikit-learn>=1.3.0
+  
+  # Optimization and Control (Apple Silicon compatible)
+  - cvxpy>=1.3.0
+  - osqp>=0.6.0
+  
+  # Documentation and Visualization
+  - jupyter>=1.0.0
+  - ipython>=8.0.0
+  - ipykernel>=6.0.0
+  - plotly>=5.15.0
+  
+  # Development tools
+  - pytest>=7.0.0
+  - black>=23.0.0
+  - flake8>=6.0.0
+  
+  # System utilities
+  - pip>=23.0.0
+  - pyyaml>=6.0.0
+  - tqdm>=4.65.0
+  
+  # Pip dependencies (for packages not available in conda)
+  - pip:
+    # Reinforcement Learning
+    - stable-baselines3>=2.0.0
+    - gymnasium>=0.29.0
+    - tensorboard>=2.13.0
+    
+    # Control and Optimization
+    - control>=0.9.0
+    - slycot>=0.5.0  # For control systems
+    - qpsolvers>=3.0.0
+    - do-mpc>=4.5.0  # Model Predictive Control
+    - casadi>=3.6.0  # Optimization
+    
+    # Utilities and Visualization
+    - wandb>=0.15.0  # Experiment tracking
+    - kaleido>=0.2.0  # Plotly export
+    - openpyxl>=3.1.0  # Excel support
+    - jsonschema>=4.17.0  # JSON validation
+    
+    # Apple Silicon specific optimizations
+    - accelerate>=0.20.0  # Hugging Face acceleration
+    
+# Apple M4 Max specific notes:
+# - All packages are tested for Apple Silicon compatibility
+# - PyTorch uses Metal Performance Shaders (MPS) backend
+# - NumPy uses Accelerate framework for BLAS/LAPACK
+# - SciPy uses optimized Apple libraries
+# - CVXPY uses Apple-optimized solvers
+
