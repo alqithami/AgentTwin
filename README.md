@@ -7,8 +7,8 @@ This guide provides instructions for setting up and running the Multi-Agent Digi
 ### One-Command Setup
 ```bash
 # Clone the repository
-git clone https://github.com/agenttwin.git
-cd multi-agent-digital-twin
+git clone https://github.com/alqithami/agenttwin.git
+cd agenttwin
 
 # Run Apple M4 Max optimized setup
 make apple-setup
