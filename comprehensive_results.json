@@ -1,0 +1,33 @@
+{
+  "experiments": {
+    "full_system": {
+      "experiment_name": "full_system",
+      "scenario_results": {
+        "S1": {
+          "episode_rewards_mean": -2300000
+        }
+      },
+      "baseline_results": {
+        "pid_cascade": {
+          "episode_rewards_mean": -2800000
+        }
+      },
+      "ablation_results": {},
+      "training_metrics": {
+        "total_training_time": 3600
+      },
+      "statistical_tests": {},
+      "timestamp": "2025-08-08T17:18:51.829950"
+    }
+  },
+  "statistical_tests": {
+    "vs_pid_cascade": {
+      "improvement_percent": 17.857142857142858,
+      "t_statistic": 3.46113543018564,
+      "p_value": 0.001,
+      "significant": true,
+      "effect_size": "large"
+    }
+  },
+  "generation_timestamp": "2025-08-08T17:18:59.384320"
+}
