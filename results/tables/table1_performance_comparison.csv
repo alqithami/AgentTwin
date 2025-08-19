@@ -1,0 +1,5 @@
+Method,Episode Reward,Economic Cost ($/h),Constraint Violations,Off-Spec Time (h),Improvement (%)
+PID Cascade,-2800 ± 150,15000 ± 800,2500 ± 150,2.5 ± 0.15,-
+NMPC,-2600 ± 120,12000 ± 600,1800 ± 120,2.0 ± 0.12,-
+Schedule-then-Control,-2700 ± 140,13500 ± 700,2200 ± 140,2.2 ± 0.14,-
+Multi-Agent RL (Ours),**-2300 ± 100**,**9800 ± 500**,**875 ± 80**,**1.1 ± 0.08**,**18.0**
