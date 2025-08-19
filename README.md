@@ -1,22 +1,6 @@
-# Multi-Agent Digital Twin for Apple M4 Max
+# Multi-Agent Digital Twin
 
-This guide provides specific instructions for setting up and running the Multi-Agent Digital Twin on Apple M4 Max systems.
-
-## 🍎 Apple M4 Max Optimizations
-
-This implementation is specifically optimized for Apple M4 Max with the following enhancements:
-
-### Performance Optimizations
-- **Metal Performance Shaders (MPS)**: PyTorch with native Apple Silicon GPU acceleration
-- **Accelerate Framework**: NumPy and SciPy with Apple's optimized BLAS/LAPACK
-- **Native ARM64**: All packages compiled for Apple Silicon architecture
-- **Optimized Threading**: Thread counts tuned for M4 Max performance cores
-
-### Key Benefits
-- **3-5x faster training** compared to CPU-only implementations
-- **Native Apple Silicon support** for all dependencies
-- **Optimized memory usage** for M4 Max unified memory architecture
-- **Real-time performance** for safety shield QP optimization
+This guide provides instructions for setting up and running the Multi-Agent Digital Twin.
 
 ## 🚀 Quick Start
 
@@ -83,12 +67,12 @@ Expected output for successful setup:
 
 ## 🏃‍♂️ Running Experiments
 
-### Quick Test (5 minutes)
+### Quick Test 
 ```bash
 make reproduce-quick
 ```
 
-### Full Reproduction (30-60 minutes)
+### Full Reproduction 
 ```bash
 make reproduce
 ```
@@ -105,20 +89,8 @@ make eval
 make results
 ```
 
-## 📊 Expected Performance
 
-On Apple M4 Max, you should expect:
-
-| Component | Performance | Time |
-|-----------|-------------|------|
-| Environment Setup | Native ARM64 | < 1 minute |
-| Quick Test | MPS Accelerated | 2-3 minutes |
-| Individual Training | MPS + Optimized | 10-15 minutes |
-| Joint Training | MPS + Coordination | 15-20 minutes |
-| Full Evaluation | Parallel Processing | 20-30 minutes |
-| Results Generation | Native Plotting | 5-10 minutes |
-
-## 🔧 Apple M4 Max Specific Settings
+## 🔧 Specific Settings
 
 The setup automatically configures:
 
@@ -188,18 +160,6 @@ If performance is slower than expected:
    memory_pressure
    ```
 
-## 📈 Performance Benchmarks
-
-Typical performance on Apple M4 Max:
-
-```
-Performance Benchmark
-====================
-NumPy matrix multiplication (1000x1000): 0.045s
-PyTorch CPU matrix multiplication (1000x1000): 0.052s
-PyTorch MPS matrix multiplication (1000x1000): 0.012s
-MPS speedup: 4.33x
-```
 
 ## 🔄 Updates and Maintenance
 
@@ -217,32 +177,7 @@ git pull origin main
 pip install -e .
 ```
 
-## 📞 Support
-
-For Apple M4 Max specific issues:
-
-1. Check the [troubleshooting section](#troubleshooting) above
-2. Verify your system meets the requirements
-3. Run `make info` to get system information
-4. Open an issue with the output of `make verify`
-
-## 🎯 Next Steps
-
-After successful setup:
-
-1. **Run the quick test**: `make test`
-2. **Generate results**: `make reproduce-quick`
-3. **Explore the code**: Start with `envs/tep_env.py`
-4. **Modify experiments**: Edit `train/training_pipeline.py`
-5. **Create custom plots**: Modify `eval/generate_results.py`
-
-## 📚 Additional Resources
-
-- [Apple Silicon ML Guide](https://developer.apple.com/metal/pytorch/)
-- [PyTorch MPS Documentation](https://pytorch.org/docs/stable/notes/mps.html)
-- [Conda Apple Silicon Guide](https://conda-forge.org/docs/user/tipsandtricks.html#using-multiple-channels)
-
 ---
 
-**Happy experimenting on your Apple M4 Max! 🚀**
+**Happy experimenting! 🚀**
 
