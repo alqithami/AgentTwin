@@ -1,0 +1,4 @@
+[console_scripts]
+agenttwin-eval = eval.generate_results:main
+agenttwin-test = test_quick_training:main
+agenttwin-train = train.training_pipeline:main
