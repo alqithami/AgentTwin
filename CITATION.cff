@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it."
+title: "AgentTwin: Learning-Safe Multi-Agent Control for the Tennessee Eastman Process"
+abstract: >
+  AgentTwin is a learning-safe multi-agent control framework for the Tennessee Eastman (TE)
+  process. It couples a lightweight digital twin with a runtime safety shield and provides
+  full reproduction scripts for figures and tables reported in the manuscript.
+authors:
+  - family-names: Alqithami
+    given-names: Saad
+repository-code: "https://github.com/alqithami/AgentTwin"
+url: "https://github.com/alqithami/AgentTwin"
+license: MIT
+date-released: 2025-08-19
+keywords:
+  - reinforcement learning
+  - digital twin
+  - Tennessee Eastman
+  - process control
+  - safety shielding
+  - multi-agent systems
+preferred-citation:
+  type: software
+  title: "AgentTwin: Learning-Safe Multi-Agent Control for the Tennessee Eastman Process (software)"
+  authors:
+    - family-names: Alqithami
+      given-names: Saad
+  url: "https://github.com/alqithami/AgentTwin"
