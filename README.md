@@ -56,7 +56,7 @@ The TE simulator is a **third‑party** resource and is **not redistributed** in
 
 ## 4) Quick smoke test (few episodes)
 
-Runs a small end‑to‑end pipeline to verify the installation and TE integration.
+Runs a small end‑to‑end pipeline to verify the installation and TE integration. 
 
 ### Using Make (if available)
 ```bash
