@@ -354,22 +354,24 @@ class TrainingPipeline:
             # Run episodes with baseline controller
             episode_rewards = []
             episode_lengths = []
+            economic_costs = []
+            constraint_violations = []
+            off_spec_times = []
             
             for episode in range(5):  # Fewer episodes for baselines
+                controller.reset()
                 obs, _ = self.env.reset()
                 episode_reward = 0.0
                 episode_length = 0
+                episode_economic_cost = 0.0
+                episode_constraint_violations = 0
+                episode_off_spec_time = 0.0
                 
                 for step in range(1000):  # Max episode length
-                    # Get baseline action (simplified)
-                    if controller_name == 'pid_cascade':
-                        # Use PID controller
-                        measurements = list(obs.values())[0][:41]  # First agent's measurements
-                        setpoints = measurements.copy()  # Use current as setpoint (simplified)
-                        action = controller.compute_action(measurements, setpoints, 6.0)
-                    else:
-                        # Use random action for other controllers (simplified)
-                        action = np.random.randn(12) * 0.1
+                    # Use baseline controller for control actions
+                    measurements = list(obs.values())[0][:41]  # First agent's measurements
+                    setpoints = measurements.copy()  # Use current as setpoint (simplified)
+                    action = controller.compute_action(measurements, setpoints, 6.0)
                     
                     # Create action dict for all agents
                     actions = {}
@@ -389,17 +391,39 @@ class TrainingPipeline:
                     episode_reward += sum(rewards.values())
                     episode_length += 1
                     
+                    info = infos.get('reactor_controller', {})
+                    if isinstance(info, dict):
+                        episode_economic_cost += info.get('economic_cost', 0.0)
+                        episode_constraint_violations += info.get('constraint_violations', 0)
+                        episode_off_spec_time += info.get('off_spec_time', 0.0)
+                    
                     if any(dones.values()) or any(truncated.values()):
                         break
                 
                 episode_rewards.append(episode_reward)
                 episode_lengths.append(episode_length)
+                economic_costs.append(episode_economic_cost)
+                constraint_violations.append(episode_constraint_violations)
+                off_spec_times.append(episode_off_spec_time)
             
             baseline_results[controller_name] = {
                 'episode_rewards_mean': np.mean(episode_rewards),
                 'episode_rewards_std': np.std(episode_rewards),
                 'episode_lengths_mean': np.mean(episode_lengths),
-                'episode_lengths_std': np.std(episode_lengths)
+                'episode_lengths_std': np.std(episode_lengths),
+                'economic_costs_mean': np.mean(economic_costs),
+                'economic_costs_std': np.std(economic_costs),
+                'constraint_violations_mean': np.mean(constraint_violations),
+                'constraint_violations_std': np.std(constraint_violations),
+                'off_spec_times_mean': np.mean(off_spec_times),
+                'off_spec_times_std': np.std(off_spec_times),
+                'episode_data': {
+                    'episode_rewards': episode_rewards,
+                    'episode_lengths': episode_lengths,
+                    'economic_costs': economic_costs,
+                    'constraint_violations': constraint_violations,
+                    'off_spec_times': off_spec_times
+                }
             }
         
         return baseline_results
@@ -887,4 +911,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
