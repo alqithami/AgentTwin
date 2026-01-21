@@ -748,6 +748,7 @@ class MultiAgentRLSystem:
                 summary[f"{key}_std"] = np.std(values)
                 summary[f"{key}_min"] = np.min(values)
                 summary[f"{key}_max"] = np.max(values)
+        summary["episode_data"] = evaluation_metrics
         
         logger.info("Evaluation completed")
         logger.info(f"Average episode reward: {summary.get('episode_rewards_mean', 0.0):.3f}")
@@ -943,4 +944,3 @@ if __name__ == "__main__":
     print(f"Evaluation results: {results}")
     
     print("Multi-agent RL system test completed successfully!")
-
