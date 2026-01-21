@@ -801,7 +801,7 @@ class ResultsGenerator:
         
         # Save as LaTeX
         latex_table = df.to_latex(index=False, escape=False, 
-                                 caption='Performance comparison across different control methods on TEP scenarios. Values show mean ± standard deviation over 10 episodes. Best results in bold.',
+                                 caption='Performance comparison across different control methods on TEP scenarios. Values show mean ± standard deviation over evaluation episodes. Best results in bold.',
                                  label='tab:performance_comparison')
         
         with open(tables_dir / 'table1_performance_comparison.tex', 'w') as f:
@@ -923,6 +923,9 @@ class ResultsGenerator:
         safety_stats = statistical_tests.get('safety_impact', {})
         coord_stats = statistical_tests.get('coordination_impact', {})
 
+        safety_significance = "Yes" if safety_stats.get('significant') else "No"
+        coord_significance = "Yes" if coord_stats.get('significant') else "No"
+
         report_content = f"""
 # Multi-Agent Digital Twin Experimental Results Summary
 
@@ -939,11 +942,11 @@ class ResultsGenerator:
 
 ### Safety Analysis
 - Constraint reduction vs no-shield: {f"{safety_stats.get('constraint_reduction_percent', 0):.2f}%" if safety_stats else "N/A"}
-- Statistical significance: {safety_stats.get('significant', False) if safety_stats else "N/A"}
+- Statistical significance: {safety_significance if safety_stats else "N/A"}
 
 ### Coordination Analysis
 - Performance improvement vs no-coordination: {f"{coord_stats.get('performance_improvement_percent', 0):.2f}%" if coord_stats else "N/A"}
-- Statistical significance: {coord_stats.get('significant', False) if coord_stats else "N/A"}
+- Statistical significance: {coord_significance if coord_stats else "N/A"}
 
 ### Statistical Significance
 - Comparisons reported: {len(statistical_tests)}
