@@ -1,6 +1,6 @@
 # AgentTwin — Multi‑Agent Digital Twin for Joint Scheduling & Control (Tennessee Eastman)
 
-This repository contains the code to reproduce the **AgentTwin** results for the Tennessee Eastman (TE) process: multi‑agent reinforcement learning with a runtime safety shield, plus figure/table generation for the paper.
+This repository contains the code to reproduce the **AgentTwin** results for the Tennessee Eastman (TE) process: multi‑agent reinforcement learning with a runtime safety shield.
 
 ---
 
