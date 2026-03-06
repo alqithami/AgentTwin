@@ -1,4 +1,4 @@
-# AgentTwin — Reproducible Code Package (J. Process Control)
+# AgentTwin — Reproducible Code Package 
 
 This package reproduces the AgentTwin experiments on the **Tennessee Eastman Process (TEP)** using:
 - A **real** TEP simulator vendored under `third_party/tep/` (source and license preserved).
