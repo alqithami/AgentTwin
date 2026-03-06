@@ -2,7 +2,7 @@
 **Agentic digital-twin testbed for integrated scheduling and regulatory control on the Tennessee Eastman Process (TEP)**
 ![agenttwin_graphical_abstract_generated (1)](https://github.com/user-attachments/assets/80283cd6-640a-4732-86e5-4457f6092cbf)
 
-This repository provides a **fully reproducible** experimental pipeline for the *AgentTwin* architecture described in the accompanying Journal of Process Control manuscript. The codebase is designed for **fair, auditable comparisons** of learning-based and classical controllers on a simulation-based digital twin of the **Tennessee Eastman Process (TEP)**.
+This repository provides a **fully reproducible** experimental pipeline for the *AgentTwin* architecture. The codebase is designed for **fair, auditable comparisons** of learning-based and classical controllers on a simulation-based digital twin of the **Tennessee Eastman Process (TEP)**.
 
 AgentTwin integrates three components:
 
