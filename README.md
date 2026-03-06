@@ -1,185 +1,147 @@
-# AgentTwin — Multi‑Agent Digital Twin for Joint Scheduling & Control (Tennessee Eastman)
+# AgentTwin — Reproducible Code Package (J. Process Control)
 
-This repository contains the code to reproduce the **AgentTwin** results for the Tennessee Eastman (TE) process: multi‑agent reinforcement learning with a runtime safety shield.
+This package reproduces the AgentTwin experiments on the **Tennessee Eastman Process (TEP)** using:
+- A **real** TEP simulator vendored under `third_party/tep/` (source and license preserved).
+- A hierarchical MARL architecture:
+  - **Continuous control**: residual RL on top of the standard TE decentralized PI controller.
+  - **Scheduling**: discrete operating-mode selection on a slower time scale.
+  - **Safety shield**: QP-based residual filter (OSQP) with a heuristic fallback.
 
----
+The training and evaluation scripts generate:
+- Raw per-episode metrics (`results/raw/`)
+- CSV + LaTeX tables (`results/tables/`)
+- B/W figures with a single accent color (`results/plots/`) saved as both PNG and PDF
 
-## 1) Clone
+## 1) Installation
 
-```bash
-git clone https://github.com/alqithami/AgentTwin.git
-cd AgentTwin
-```
+Recommended: Python **3.10+** (3.11 works well).
 
----
-
-## 2) Install
-
-### Option A — Conda (recommended)
-```bash
-conda env create -f environment.yml
-conda activate agenttwin
-pip install -e .
-```
-
-### Option B — venv + pip
 ```bash
 python -m venv .venv
-source .venv/bin/activate        # (Windows: .venv\Scripts\activate)
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -e .
 ```
 
-> **Note**: Apple Silicon users may additionally run the optimized setup script:
-> ```bash
-> bash setup_apple_m4.sh
-> ```
+## 2) Verify the simulator
 
----
-
-## 3) Tennessee Eastman (TE) Simulator — external dependency
-
-The TE simulator is a **third‑party** resource and is **not redistributed** in this repository.
-
-- **Source (original):** N. Lawrence Ricker’s *Tennessee Eastman Challenge Archive* (University of Washington) — <https://depts.washington.edu/control/LARRY/TE/download.html>
-- **Install & path setup:** download/unzip the TE archive locally, then point the code to its root via an environment variable:
-  ```bash
-  export TEP_HOME=/path/to/te-simulator       # Windows (PowerShell): $env:TEP_HOME="C:\te-simulator"
-  ```
-- **Wrappers/configs here:** our Python wrappers live under `envs/`, and experiments are configured by YAML files in `configs/`.
-- **Quick check:** after activating your environment, verify the variable is set:
-  ```bash
-  python -c "import os; print('TEP_HOME:', os.getenv('TEP_HOME'))"
-  ```
-
----
-
-## 4) Quick smoke test (few episodes)
-
-Runs a small end‑to‑end pipeline to verify the installation and TE integration. 
-
-### Using Make (if available)
 ```bash
-make reproduce-quick
+make verify
 ```
 
-### Or directly with Python
+To additionally confirm that **scenarios are distinct** (different demand schedules,
+disturbances, biases, etc.) and that disturbances become active as expected:
+
 ```bash
-python execute_complete_pipeline.py --config configs/quick.yaml --out results/quick
+make verify_scenarios
 ```
 
-Outputs (examples):
-- Logs and intermediate artifacts → `results/quick/`
-- Any generated preview figures/tables → inside `results/quick/`
+## 3) Quick end-to-end run (smoke test)
 
----
+Uses `configs/quick.yaml` (short horizons, few timesteps):
 
-## 5) Full reproduction
+```bash
+make reproduce_quick
+```
 
-Runs all scenarios/seeds used in the paper and exports **camera‑ready figures** and **CSV tables**.
+## 4) Paper-style run (hours+)
 
-### Using Make (if available)
+Uses `configs/paper.yaml` (multi-seed, longer horizons):
+
 ```bash
 make reproduce
 ```
 
-### Or directly with Python
-```bash
-python execute_complete_pipeline.py --config configs/main.yaml --out results/paper --export-figures
-```
-
-Expected outputs:
-- **Figures (vector PDF + PNG)** exported under `results/paper/` (subfolder `figures/` if configured).
-- **Aggregated tables (CSV)** exported under `tables/` (and/or `results/paper/` depending on config).
-- A reproducibility log containing commit hash, config, and seed list.
-
----
-
-## 6) Reproducibility settings (as used in the paper)
-
-- **Seeds × episodes:** 5 seeds × 50 episodes per scenario (5 scenarios) = 1,250 evaluation episodes.
-- **Primary metrics:** episode cost (−reward), safety shield **pre‑shield interventions**, **post‑shield hard violations** (target 0).
-- **Statistical tests:** Welch’s *t*‑test with Bonferroni correction across 15 planned comparisons (adjusted α = 0.0033).
-
-You can adjust seeds/episodes via the YAML files in `configs/`.
-
----
-
-## 7) Useful Make targets (if `Makefile` is present)
+Optional stronger configuration:
 
 ```bash
-# create environment (printed guidance)
-make setup
-
-# quick smoke run (few episodes per scenario)
-make reproduce-quick
-
-# full results + export camera‑ready figures
-make reproduce
-
-# export figures from existing results
-make figures
-
-# housekeeping
-make clean
+make reproduce_strong
 ```
 
-> If `make` is not available on your system, use the equivalent Python commands shown above.
+Adjust seeds, timesteps, and horizons directly in `configs/paper.yaml`.
 
----
+## 5) Outputs
 
-## 8) Troubleshooting
+After evaluation:
 
-- **TEP_HOME not set / simulator not found**  
-  Ensure you downloaded the TE archive (link above) and set `TEP_HOME` to its root folder.
+- `results/raw/all_episode_metrics.csv`: one row per episode (seed × scenario × method)
 
-- **Apple Silicon (M‑series) performance**  
-  Use the provided `setup_apple_m4.sh` to configure accelerated math backends; verify PyTorch MPS availability:
-  ```bash
-  python -c "import torch; print('MPS available:', torch.backends.mps.is_available())"
-  ```
+Tables (CSV + LaTeX):
+- `results/tables/table1_performance_S2.csv` and `.tex`
+- `results/tables/table2_safety_S2.csv` and `.tex`
+- `results/tables/table3_scenarios.csv` and `.tex`
+- `results/tables/table4_fairness_S2.csv` and `.tex`
+- `results/tables/table5_scheduling_S2.csv` and `.tex`  (demand adherence + switching)
 
-- **Clean and re‑install**  
-  ```bash
-  conda env remove -n agenttwin || true
-  conda env create -f environment.yml
-  conda activate agenttwin
-  pip install -e .
-  ```
 
----
+Plots (PNG + PDF):
+- `results/plots/figure1_reward_S2.(png|pdf)`
+- `results/plots/figure2_violations_S2.(png|pdf)`
+- `results/plots/figure3_scenario_robustness.(png|pdf)`
+- `results/plots/figure4_fairness_S2.(png|pdf)`
 
-## 9) Data availability
+An executive summary is written to:
+- `results/executive_summary.md`
 
-All reproduction scripts and aggregated tables/figures are provided in this repository. Large raw logs may be generated under `results/` during runs and can be re‑created by executing the pipelines above.
+## 6) Scenario set (S1–S5)
 
----
+Scenarios are defined in `envs/scenarios.py`:
+- **S1** nominal grade changes
+- **S2** dynamic demand
+- **S3** fault/disturbance injection (TE IDV)
+- **S4** sensor bias (observation corruption)
+- **S5** model/actuator mismatch (MV gain/bias)
 
-## 10) Repository layout (key paths)
+You can switch between the minimal scenario set and the full set by editing:
+- `experiment.scenario_set` in the YAML config.
 
+## 6.1) Scheduling reward terms
+
+The scheduling environment includes optional penalties that are important for
+integrated scheduling-control evaluation:
+
+- `reward.demand_mismatch`: penalty when the selected operating mode differs from
+  the (exogenous) demand mode at that time.
+- `reward.mode_switch`: penalty for switching operating modes (discourages
+  unnecessary chattering).
+
+These are configured in the YAML files under `env.reward`.
+
+## FAQ: Why do I see `DummyVecEnv`?
+
+Stable-Baselines3 wraps any Gymnasium environment in a *vectorized* wrapper (often `DummyVecEnv`) so that algorithms have a consistent interface.
+This does **not** mean the plant is a dummy simulation — it is just a batching wrapper.
+
+## License and attribution
+
+The Tennessee Eastman simulator code under `third_party/tep/` is vendored from an open-source implementation.
+See `third_party/tep/LICENSE` for license terms and attribution.
+
+## 7) Linear data-driven MPC baseline (LinMPC)
+
+To address reviewer requests for a *data-driven MPC* baseline, this package includes a **mode-dependent linear MPC** controller that operates in the same residual-control structure as the RL controllers:
+- The decentralized PI controller remains in the loop.
+- LinMPC computes a **continuous residual correction** (12-D) every control interval.
+- The residual is solved via a condensed QP with **OSQP**.
+
+### Step-by-step
+
+```bash
+# 1) Collect identification data (one dataset per operating mode)
+python -m baselines.linmpc.collect_id_data --config configs/paper.yaml --out_dir artifacts/linmpc --seed 0
+
+# 2) Fit a mode-dependent linear model
+python -m baselines.linmpc.fit_model --data_dir artifacts/linmpc/data --out_path artifacts/linmpc/model_linmpc.npz
+
+# 3) Evaluate linMPC and merge into the existing results (tables/figures regenerated)
+python -m baselines.linmpc.eval_linmpc --config configs/paper.yaml --model artifacts/linmpc/model_linmpc.npz --results_dir results
 ```
-agents/           # agent definitions and policies
-configs/          # experiment YAML configs (quick.yaml, main.yaml, ...)
-control/          # control logic components
-envs/             # Tennessee Eastman environment wrappers and helpers
-eval/             # evaluation utilities
-results/          # outputs (created by runs)
-logs/             # logs (created by runs)
-shield/           # safety shield implementation
-tables/           # aggregated CSV tables (exported)
-train/            # training helpers
-execute_complete_pipeline.py  # end‑to‑end runner
-environment.yml   # Conda environment (if using conda)
-requirements.txt  # pip requirements (if using venv)
-Makefile          # convenience targets (optional but included)
-README.md         # this file
+
+### One-shot target
+
+```bash
+make linmpc_all
 ```
 
----
-
-### Citation
-If you use this code in your research, please cite the AgentTwin manuscript (and this repository). A `CITATION.cff` is included in the repo.
-
----
-
-**Happy experimenting!** 🚀
+Notes:
+- LinMPC does **not** require any logs from the RL training run. It generates its own identification dataset using the real simulator.
+- If you already have high-frequency trajectories saved (e.g., full (state, action) traces), you can reuse them for identification, but the default pipeline is self-contained.

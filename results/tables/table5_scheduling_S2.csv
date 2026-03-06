@@ -1,0 +1,6 @@
+method,demand_mismatch_seconds_mean,demand_mismatch_seconds_std,mode_switches_mean,mode_switches_std
+Ablation: no shield,0.0,0.0,0.0,0.0
+AgentTwin (Scheduler+MA),0.0,0.0,0.0,0.0
+Centralized SAC,0.0,0.0,0.0,0.0
+Multi-agent SAC,0.0,0.0,0.0,0.0
+PID (PI controller),0.0,0.0,0.0,0.0

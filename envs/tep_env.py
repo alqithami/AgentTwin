@@ -1,638 +1,893 @@
+"""Tennessee Eastman Process (TEP) Gymnasium environments.
+
+This module provides **real** Tennessee Eastman Process dynamics via the vendored
+`third_party.tep` simulator.
+
+Environment design
+------------------
+- Continuous control env: residual RL (continuous action) on top of the
+  standard decentralized TE PI controller.
+- Scheduling env: discrete operating-mode switching (modes 1--6) on a slower
+  time scale, combined with the residual controllers.
+
+The goal is to provide a runnable, end-to-end reproduction pipeline with:
+- deterministic seeds
+- scenario-driven evaluation (S1--S5)
+- optional QP-based safety shield
+
+Note on DummyVecEnv
+-------------------
+Stable-Baselines3 uses vectorized environments. `DummyVecEnv` is simply a
+single-process vector wrapper and does not imply a "fake" environment.
+
 """
-Tennessee Eastman Process Environment
 
-This module implements a comprehensive simulation environment for the Tennessee
-Eastman Process (TEP), a widely-used benchmark for process control research.
+from __future__ import annotations
 
-Key Features:
-- Multi-time-scale operation (6s control, 5min scheduling)
-- Five evaluation scenarios (S1-S5) with varying complexity
-- Realistic process dynamics and constraints
-- Economic cost calculation and performance metrics
-- Support for both single-agent and multi-agent control
-
-The TEP consists of five major unit operations:
-1. Reactor - where reactions A+C→D, A+C+D→E, A+E→F, 3D→G occur
-2. Product condenser - separates reactor output
-3. Vapor-liquid separator - separates condensed and vapor phases
-4. Product stripper - removes remaining lights
-5. Compressor - recycles unreacted materials
-
-Author: Implementation for Multi-Agent Digital Twin Research
-"""
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass
-from enum import Enum
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError as e:  # pragma: no cover
+    raise ImportError(
+        "gymnasium is required. Install dependencies via: pip install -r requirements.txt"
+    ) from e
 
+from third_party.tep.simulator import TEPSimulator, ControlMode
+from third_party.tep.controllers import DecentralizedController
+from third_party.tep.constants import MEASUREMENT_NAMES, MANIPULATED_VAR_NAMES, OPERATING_MODES
 
-class ScenarioType(Enum):
-    """Enumeration of TEP evaluation scenarios"""
-    S1_BASIC_CHANGES = "S1_basic_changes"
-    S2_FEED_DRIFT = "S2_feed_drift"
-    S3_COOLING_DISTURBANCE = "S3_cooling_disturbance"
-    S4_SENSOR_BIAS = "S4_sensor_bias"
-    S5_RANDOM_FAULTS = "S5_random_faults"
+from envs.scenarios import ScenarioType, ScenarioDefinition
+from envs.shield import SafetyShieldHeuristic, SafetyShieldQP, QPShieldConfig
 
 
-class ProductionMode(Enum):
-    """Production grade modes"""
-    GRADE_A = "grade_a"
-    GRADE_B = "grade_b"
-    GRADE_C = "grade_c"
+# =============================================================================
+# MV groups (for multi-agent control)
+# =============================================================================
+# 0-based MV indices; group names should match evaluation scripts.
+MV_GROUPS: Dict[str, List[int]] = {
+    "feed": [0, 1, 2, 3],          # feed valves/flows
+    "separator": [4, 5, 6, 7],     # separator + purge related
+    "utility": [8, 9, 10, 11],     # utilities (cooling water, steam, etc.)
+}
+
+
+# =============================================================================
+# Configuration dataclasses
+# =============================================================================
+@dataclass
+class SafetyLimits:
+    """Key safety limits used by the reproduction package.
+
+    These limits are intentionally conservative and are enforced through:
+    - hard termination when the TE simulator reports shutdown
+    - soft penalties in the reward
+    - optional safety shield for residual actions
+    """
+
+    reactor_pressure_max: float = 3000.0      # kPa
+    reactor_temp_max: float = 150.0          # degC
+    sep_pressure_max: float = 3500.0         # kPa
+    stripper_pressure_max: float = 3300.0    # kPa
+    reactor_level_max: float = 90.0          # %
+    reactor_level_min: float = 10.0          # %
+
+
+@dataclass
+class RewardWeights:
+    """Reward/cost weights."""
+
+    tracking: float = 1.0
+    utilities: float = 1e-3
+    mv_move: float = 1e-3
+    constraint_violation: float = 50.0
+
+    # Scheduling-level penalties (used in TEPSchedulingEnv)
+    # NOTE: defaults are 0.0 to preserve backwards compatibility unless
+    # explicitly enabled from YAML.
+    demand_mismatch: float = 0.0
+    mode_switch: float = 0.0
 
 
 @dataclass
 class TEPConfig:
-    """Configuration parameters for TEP environment"""
-    # Time parameters
-    dt: float = 6.0  # Control time step (seconds)
-    scheduling_dt: float = 300.0  # Scheduling time step (5 minutes)
-    max_episode_steps: int = 4800  # 8 hours at 6s steps
-    
-    # Economic parameters
-    product_value: float = 1000.0  # $/kmol product
-    raw_material_cost: float = 500.0  # $/kmol raw material
-    energy_cost: float = 0.1  # $/kJ energy
-    off_spec_penalty: float = 2000.0  # $/hour off-spec
-    
-    # Process constraints
-    max_reactor_temp: float = 175.0  # °C
-    max_separator_pressure: float = 3000.0  # kPa
-    max_stripper_level: float = 95.0  # %
-    min_stripper_level: float = 5.0  # %
-    
-    # Noise parameters
-    measurement_noise_std: float = 0.01
-    process_noise_std: float = 0.005
-    
-    # Safety parameters
-    enable_safety_constraints: bool = True
-    constraint_violation_penalty: float = 10000.0
+    """Unified configuration for TEP control + scheduling experiments."""
+
+    # Reproducibility
+    seed: int = 0
+
+    # Simulator
+    tep_backend: str = "python"  # 'python' | 'fortran' | None('auto')
+
+    # Episode timing
+    episode_length_sec: int = 8 * 3600
+    control_interval_sec: int = 6
+    scheduling_interval_sec: int = 300
+    warmup_sec: int = 0
+
+    # Policy structure
+    residual_max: float = 10.0
+    pi_update_interval_sec: int = 1
+
+    # Scenario / initial condition
+    scenario: ScenarioType = ScenarioType.S1_NOMINAL
+    initial_mode: int = 1
+    randomize_initial_mode: bool = False
+    follow_demand_in_training: bool = False
+
+    # Demand profile
+    demand_schedule: List[Tuple[int, int]] = field(default_factory=list)
+    demand_change_prob: float = 0.0
+    demand_interval_sec: int = 1800
+
+    # Disturbances
+    disturbances: List[Tuple[int, int, int]] = field(default_factory=list)  # (idv_idx, onset_sec, duration_sec)
+
+    # Sensor bias (observation stream)
+    sensor_bias: Dict[int, float] = field(default_factory=dict)
+
+    # Actuator mismatch (applied MV gain/bias)
+    mv_gain_sigma: float = 0.0
+    mv_bias_sigma: float = 0.0
+
+    # Safety
+    use_safety_shield: bool = True
+    safety_shield_type: str = "qp"  # 'qp' | 'heuristic' | 'off'
+    qp_shield: QPShieldConfig = field(default_factory=QPShieldConfig)
+    safety: SafetyLimits = field(default_factory=SafetyLimits)
+
+    # Reward weights
+    weights: RewardWeights = field(default_factory=RewardWeights)
+
+    # Logging/diagnostics
+    record_trace: bool = False
+
+    # Backwards-compatible alias (some earlier scripts used this name)
+    scheduler_interval_sec: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.scheduler_interval_sec is not None:
+            # Maintain backwards compatibility
+            self.scheduling_interval_sec = int(self.scheduler_interval_sec)
+
+        self.control_interval_sec = int(self.control_interval_sec)
+        self.scheduling_interval_sec = int(self.scheduling_interval_sec)
+        self.episode_length_sec = int(self.episode_length_sec)
+        self.warmup_sec = int(self.warmup_sec)
+        self.pi_update_interval_sec = int(self.pi_update_interval_sec)
+
+        if self.tep_backend in {"auto", "none"}:
+            self.tep_backend = None  # let simulator auto-select
+
+        # Normalize shield type
+        self.safety_shield_type = str(self.safety_shield_type).strip().lower()
+        if not self.use_safety_shield or self.safety_shield_type in {"off", "none", "false"}:
+            self.use_safety_shield = False
+            self.safety_shield_type = "off"
 
 
-class TEPEnvironment(gym.Env):
-    """
-    Tennessee Eastman Process Environment
-    
-    This environment simulates the Tennessee Eastman Process with realistic
-    dynamics, disturbances, and economic objectives.
-    """
-    
-    def __init__(self, 
-                 scenario: ScenarioType = ScenarioType.S1_BASIC_CHANGES,
-                 config: Optional[TEPConfig] = None):
-        super().__init__()
-        
-        self.config = config or TEPConfig()
-        self.scenario = scenario
-        
-        # Initialize process state
-        self._init_process_variables()
-        
-        # Define observation and action spaces
-        self._init_spaces()
-        
-        # Initialize scenario-specific parameters
-        self._init_scenario()
-        
-        # Logging and metrics
-        self.episode_data = []
-        self.current_step = 0
-        self.episode_count = 0
-        
-        logger.info(f"TEP Environment initialized with scenario {scenario}")
-        
-        # Initialize scenario configuration
-        self._init_scenario()
-        
-        # Initialize process variables
-        self._init_process_variables()
-    
-    def _init_process_variables(self):
-        """Initialize process variables"""
-        # Process measurements (41 variables)
-        # Based on standard TEP variable definitions
-        self.measurement_names = [
-            'A_feed_flow', 'D_feed_flow', 'E_feed_flow', 'A_C_feed_flow',
-            'Recycle_flow', 'Reactor_feed_rate', 'Reactor_pressure', 'Reactor_level',
-            'Reactor_temperature', 'Purge_rate', 'Product_sep_temp', 'Product_sep_level',
-            'Product_sep_pressure', 'Product_sep_underflow', 'Stripper_level', 'Stripper_pressure',
-            'Stripper_underflow', 'Stripper_temperature', 'Stripper_steam_flow', 'Compressor_work',
-            'Reactor_cooling_temp', 'Separator_cooling_temp', 'A_composition', 'B_composition',
-            'C_composition', 'D_composition', 'E_composition', 'F_composition', 'A_purge_comp',
-            'B_purge_comp', 'C_purge_comp', 'D_purge_comp', 'E_purge_comp', 'F_purge_comp',
-            'G_purge_comp', 'H_purge_comp', 'D_product_comp', 'E_product_comp', 'F_product_comp',
-            'G_product_comp', 'H_product_comp'
-        ]
-        
-        # Manipulated variables (12 variables)
-        self.manipulated_names = [
-            'D_feed_flow_valve', 'E_feed_flow_valve', 'A_feed_flow_valve', 'A_C_feed_flow_valve',
-            'Compressor_recycle_valve', 'Purge_valve', 'Separator_pot_liquid_valve',
-            'Stripper_liquid_product_valve', 'Stripper_steam_valve', 'Reactor_cooling_valve',
-            'Condenser_cooling_valve', 'Agitator_speed'
-        ]
-        
-        # Initialize state variables
-        self._init_process_state()
-        
-        # Initialize economic tracking
-        self.total_economic_cost = 0.0
-        self.total_off_spec_time = 0.0
-        self.constraint_violations = 0
-        
-        # Production tracking
-        self.current_production_mode = ProductionMode.GRADE_A
-        self.production_targets = {
-            ProductionMode.GRADE_A: {'D_product': 0.9, 'E_product': 0.1},
-            ProductionMode.GRADE_B: {'D_product': 0.7, 'E_product': 0.3},
-            ProductionMode.GRADE_C: {'D_product': 0.5, 'E_product': 0.5}
-        }
-    
-    def _init_process_state(self):
-        """Initialize process state variables to steady-state values"""
-        # Steady-state values for TEP (from literature)
-        self.measurements = np.array([
-            0.25052, 4.0975, 9.3477, 22.949, 18.776, 50.338, 2705.0, 75.0,
-            120.4, 0.33712, 80.109, 50.0, 2633.7, 25.16, 50.0, 3102.2,
-            22.949, 65.731, 230.31, 341.43, 94.599, 77.297, 32.188, 13.823,
-            24.644, 18.776, 8.4036, 1.5699, 26.902, 4.5301, 7.2996, 51.595,
-            11.859, 1.7677, 0.31827, 0.01787, 53.722, 43.827, 1.8968, 0.42073, 0.024297
-        ])
-        
-        # Manipulated variables (steady-state setpoints)
-        self.manipulated_vars = np.array([
-            63.053, 53.980, 24.644, 61.302, 22.210, 40.064, 38.100,
-            46.534, 47.446, 41.106, 18.114, 50.0
-        ])
-        
-        # Internal state variables for dynamics
-        self.reactor_holdup = 1000.0  # kmol
-        self.separator_holdup = 500.0  # kmol
-        self.stripper_holdup = 200.0  # kmol
-        
-        # Disturbance variables
-        self.disturbances = np.zeros(20)  # 20 possible disturbances
-        
-        # Time tracking
-        self.process_time = 0.0
-        
-    def _init_spaces(self):
-        """Initialize observation and action spaces"""
-        # Observation space: measurements + some internal states
-        obs_dim = len(self.measurement_names) + 10  # Extra for internal states
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+# =============================================================================
+# Helpers
+# =============================================================================
+_DEF_MAX_XMEAS = np.array([
+    1.0, 10000.0, 10000.0, 20.0, 1.0, 1.0, 5000.0, 100.0, 200.0, 1.0,
+    1.0, 100.0, 5000.0, 1.0, 100.0, 5000.0, 1.0, 200.0, 1.0, 1.0,
+    1.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+    100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+    100.0
+], dtype=np.float32)
+
+_DEF_MAX_XMV = np.array([100.0] * 12, dtype=np.float32)
+
+
+def _one_hot(idx: int, size: int) -> np.ndarray:
+    v = np.zeros(size, dtype=np.float32)
+    v[int(idx)] = 1.0
+    return v
+
+
+# =============================================================================
+# Plant wrapper
+# =============================================================================
+class TEPPlant:
+    """A thin wrapper around the TEPSimulator for residual control."""
+
+    def __init__(self, config: TEPConfig):
+        self.config = config
+
+        self.sim = TEPSimulator(
+            control_mode=ControlMode.OPEN_LOOP,
+            backend=config.tep_backend,
+            random_seed=int(config.seed),
         )
-        
-        # Action space: continuous adjustments to manipulated variables
-        # Actions are residual adjustments to baseline control
-        self.action_space = spaces.Box(
-            low=-10.0, high=10.0, shape=(len(self.manipulated_names),), dtype=np.float32
-        )
-        
-        # Scheduler action space (discrete)
-        self.scheduler_action_space = spaces.MultiDiscrete([3, 3, 3, 3])  # mode, quality, throughput, horizon
-        
-    def _init_scenario(self):
-        """Initialize scenario-specific parameters"""
-        self.scenario_config = {
-            ScenarioType.S1_BASIC_CHANGES: {
-                'grade_changes': [(1200, ProductionMode.GRADE_B), (2400, ProductionMode.GRADE_C), (3600, ProductionMode.GRADE_A)],
-                'disturbances': [],
-                'faults': []
-            },
-            ScenarioType.S2_FEED_DRIFT: {
-                'grade_changes': [(1000, ProductionMode.GRADE_B), (2000, ProductionMode.GRADE_C), (3000, ProductionMode.GRADE_A), (4000, ProductionMode.GRADE_B)],
-                'disturbances': [('feed_composition_drift', 0, 4800)],
-                'faults': []
-            },
-            ScenarioType.S3_COOLING_DISTURBANCE: {
-                'grade_changes': [(1200, ProductionMode.GRADE_B), (2400, ProductionMode.GRADE_C), (3600, ProductionMode.GRADE_A)],
-                'disturbances': [('reactor_cooling_loss', 1500, 2000)],
-                'faults': []
-            },
-            ScenarioType.S4_SENSOR_BIAS: {
-                'grade_changes': [(1200, ProductionMode.GRADE_B), (2400, ProductionMode.GRADE_C)],
-                'disturbances': [('composition_sensor_bias', 800, 4800)],
-                'faults': []
-            },
-            ScenarioType.S5_RANDOM_FAULTS: {
-                'grade_changes': [(1000, ProductionMode.GRADE_B), (2500, ProductionMode.GRADE_C), (4000, ProductionMode.GRADE_A)],
-                'disturbances': [],
-                'faults': [('random_fault_1', 1800, 2200), ('random_fault_2', 3200, 3800)]
-            }
+        self.sim.initialize()
+
+        self.base_ctrl = DecentralizedController(mode=int(config.initial_mode))
+        self.base_ctrl.reset()
+
+        self.current_mode = int(config.initial_mode)
+        self.t = 0  # seconds since episode start
+
+        # Disturbance bookkeeping
+        self._disturbances = list(config.disturbances)
+        self._active_disturbances: Dict[int, int] = {}
+
+        # Sensor bias vector (41)
+        self._sensor_bias = np.zeros(41, dtype=np.float32)
+        for k, v in config.sensor_bias.items():
+            if 0 <= int(k) < 41:
+                self._sensor_bias[int(k)] = float(v)
+
+        # Actuator mismatch parameters (sampled on reset)
+        self.mv_gain = np.ones(12, dtype=np.float32)
+        self.mv_bias = np.zeros(12, dtype=np.float32)
+        self._rng = np.random.default_rng(int(config.seed))
+        self._sample_actuator_mismatch()
+
+        # Safety shield
+        self.shield = None
+        if config.use_safety_shield:
+            if config.safety_shield_type == "heuristic":
+                self.shield = SafetyShieldHeuristic(config.safety)
+            elif config.safety_shield_type == "qp":
+                try:
+                    self.shield = SafetyShieldQP(
+                        limits=config.safety,
+                        residual_max=config.residual_max,
+                        cfg=config.qp_shield,
+                        backend=(config.tep_backend or "python"),
+                        seed=int(config.seed),
+                        dt_sec=1,
+                    )
+                except Exception as e:
+                    # Fail gracefully to heuristic rather than hard-crashing
+                    print(f"[WARN] QP shield unavailable ({e}); falling back to heuristic shield.")
+                    self.shield = SafetyShieldHeuristic(config.safety)
+            else:
+                self.shield = None
+
+        # Cache for MV move penalty
+        self._prev_xmv = self.sim.process.get_xmv().copy()
+
+        # Optional trace
+        self._trace: Dict[str, List[Any]] = {
+            "t": [],
+            "mode": [],
+            "xmeas": [],
+            "xmv": [],
+            "residual": [],
+            "reward": [],
         }
-        
-        # Add string mapping for convenience
-        scenario_mapping = {
-            'S1': ScenarioType.S1_BASIC_CHANGES,
-            'S2': ScenarioType.S2_FEED_DRIFT,
-            'S3': ScenarioType.S3_COOLING_DISTURBANCE,
-            'S4': ScenarioType.S4_SENSOR_BIAS,
-            'S5': ScenarioType.S5_RANDOM_FAULTS
-        }
-        
-        # Convert string scenario to enum if needed
-        if isinstance(self.scenario, str):
-            self.scenario = scenario_mapping.get(self.scenario, ScenarioType.S1_BASIC_CHANGES)
-        
-        self.current_scenario_config = self.scenario_config[self.scenario]
-        
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
-        """Reset the environment to initial state"""
-        super().reset(seed=seed)
-        
+
+        if config.warmup_sec > 0:
+            self._warmup(int(config.warmup_sec))
+
+    def _warmup(self, seconds: int) -> None:
+        # Run the baseline PI controller for a short warm-up to settle.
+        for _ in range(int(seconds)):
+            xmeas = self.get_xmeas_measured()
+            xmv = self.sim.process.get_xmv()
+            base_xmv = self.base_ctrl.calculate(xmeas, xmv, self.t)
+            for i in range(12):
+                self.sim.set_mv(i + 1, float(np.clip(base_xmv[i], 0.0, 100.0)))
+            ok = self.sim.step(1)
+            self.t += 1
+            if not ok:
+                break
+
+    def _sample_actuator_mismatch(self) -> None:
+        cfg = self.config
+        if cfg.mv_gain_sigma > 0:
+            self.mv_gain = (1.0 + self._rng.normal(0.0, float(cfg.mv_gain_sigma), size=12)).astype(np.float32)
+        else:
+            self.mv_gain = np.ones(12, dtype=np.float32)
+
+        if cfg.mv_bias_sigma > 0:
+            self.mv_bias = self._rng.normal(0.0, float(cfg.mv_bias_sigma), size=12).astype(np.float32)
+        else:
+            self.mv_bias = np.zeros(12, dtype=np.float32)
+
+    def reset(self, seed: Optional[int] = None, initial_mode: Optional[int] = None) -> None:
         if seed is not None:
-            np.random.seed(seed)
-        
-        # Reset process state
-        self._init_process_state()
-        
-        # Reset episode tracking
-        self.current_step = 0
-        self.episode_data = []
-        self.total_off_spec_time = 0.0
-        
-        # Initialize random variations if specified
-        if options and options.get('randomize', False):
-            self._apply_initial_randomization()
-        
-        # Log episode start
-        self.episode_count += 1
-        logger.info(f"Environment reset for episode {self.episode_count}")
-        
-        # Return initial observation
-        obs = self._get_observation()
-        info = self._get_info()
-        
+            self.config.seed = int(seed)
+        self._rng = np.random.default_rng(int(self.config.seed))
+
+        self.sim = TEPSimulator(
+            control_mode=ControlMode.OPEN_LOOP,
+            backend=self.config.tep_backend,
+            random_seed=int(self.config.seed),
+        )
+        self.sim.initialize()
+
+        mode = int(initial_mode) if initial_mode is not None else int(self.config.initial_mode)
+        self.current_mode = mode
+
+        self.base_ctrl = DecentralizedController(mode=mode)
+        self.base_ctrl.reset()
+
+        self.t = 0
+        self._active_disturbances.clear()
+        self.sim.clear_disturbances()
+        self._sample_actuator_mismatch()
+
+        self._prev_xmv = self.sim.process.get_xmv().copy()
+
+        for k in self._trace:
+            self._trace[k] = []
+
+        if self.config.warmup_sec > 0:
+            self._warmup(int(self.config.warmup_sec))
+
+    def set_mode(self, mode: int) -> None:
+        mode = int(mode)
+        if mode not in OPERATING_MODES:
+            raise ValueError(f"Invalid mode {mode}; expected 1..6")
+        if mode == self.current_mode:
+            return
+        self.current_mode = mode
+        self.base_ctrl.set_mode(mode)
+
+    def get_xmeas_true(self) -> np.ndarray:
+        return self.sim.process.get_xmeas().copy().astype(np.float32)
+
+    def get_xmeas_measured(self) -> np.ndarray:
+        # Observation stream (true + bias)
+        return (self.get_xmeas_true() + self._sensor_bias).astype(np.float32)
+
+    def get_xmv(self) -> np.ndarray:
+        return self.sim.process.get_xmv().copy().astype(np.float32)
+
+    def _apply_disturbances(self) -> None:
+        # Disturbances are specified as (idv_idx, onset_sec, duration_sec)
+        for idv_idx, onset, dur in self._disturbances:
+            idv = int(idv_idx)
+            start = int(onset)
+            end = int(onset) + int(dur)
+
+            if start <= self.t < end:
+                if self._active_disturbances.get(idv, 0) == 0:
+                    self.sim.set_disturbance(idv, 1)
+                    self._active_disturbances[idv] = 1
+            else:
+                if self._active_disturbances.get(idv, 0) == 1:
+                    self.sim.set_disturbance(idv, 0)
+                    self._active_disturbances[idv] = 0
+
+    def _tracking_costs_by_group(self, xmeas_true: np.ndarray) -> Dict[str, float]:
+        # Map a subset of setpoint indices to agent groups.
+        # This is used for fairness/payoff analysis; it does not affect training.
+        group_meas = {
+            "feed": {0, 1, 2, 3, 4, 5, 9, 39, 40},
+            "separator": {11, 12, 14, 15, 7},
+            "utility": {6, 8, 10, 17, 18, 19, 20, 21},
+        }
+        mode_cfg = OPERATING_MODES[int(self.current_mode)]
+        sp = mode_cfg.xmeas_setpoints
+        costs: Dict[str, float] = {k: 0.0 for k in group_meas}
+
+        for idx, sp_val in sp.items():
+            idx_i = int(idx)
+            err = float(xmeas_true[idx_i] - float(sp_val)) / float(_DEF_MAX_XMEAS[idx_i])
+            e2 = err * err
+            for g, idx_set in group_meas.items():
+                if idx_i in idx_set:
+                    costs[g] += e2
+
+        return costs
+
+    def run(self, seconds: int, residual: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """Run the plant forward for `seconds` at 1s resolution.
+
+        Parameters
+        ----------
+        seconds:
+            Number of 1-second integration steps.
+        residual:
+            Residual action (12,) applied additively to the baseline PI.
+
+        Returns
+        -------
+        obs_measured : np.ndarray
+            The measured observation at the end of the interval.
+        reward_sum : float
+            Accumulated reward over the interval.
+        terminated : bool
+            True if simulator shuts down.
+        truncated : bool
+            True if horizon reached (handled by gym env).
+        info : dict
+            Step diagnostics.
+        """
+
+        cfg = self.config
+        residual = np.asarray(residual, dtype=np.float32).reshape(12)
+        residual = np.clip(residual, -cfg.residual_max, cfg.residual_max)
+
+        reward_sum = 0.0
+        violations = 0
+        pre_shield_breaches = 0
+        shield_activations = 0
+        shield_solve_time_ms = 0.0
+
+        group_costs_accum = {"feed": 0.0, "separator": 0.0, "utility": 0.0}
+
+        terminated = False
+
+        # For logging/identification: average residual after shielding over the interval
+        res_applied_sum = np.zeros(12, dtype=np.float32)
+        res_applied_n = 0
+
+        for _ in range(int(seconds)):
+            self._apply_disturbances()
+
+            xmeas_meas = self.get_xmeas_measured()
+            xmeas_true = self.get_xmeas_true()
+            xmv = self.get_xmv()
+
+            # Baseline PI action (update every pi_update_interval_sec)
+            if (self.t % cfg.pi_update_interval_sec) == 0:
+                base_xmv = self.base_ctrl.calculate(xmeas_meas, xmv, self.t)
+            else:
+                base_xmv = xmv.copy()
+
+            # Safety shield acts on residual only
+            res_filt = residual.copy()
+            if self.shield is not None:
+                res_filt, s_info = self.shield.filter(xmeas_meas, residual, cfg.residual_max)
+                shield_activations += int(float(s_info.get("activated", 0.0)) > 0.5)
+                shield_solve_time_ms += float(s_info.get("solve_time_ms", 0.0))
+                # pre-shield breach proxy: constraints violated for nominal residual
+                if float(s_info.get("activated", 0.0)) > 0.5:
+                    pre_shield_breaches += 1
+
+            res_applied_sum += res_filt.astype(np.float32)
+            res_applied_n += 1
+
+            # Commanded MV, with mismatch on *applied* MV
+            cmd = np.clip(base_xmv + res_filt, 0.0, 100.0)
+            applied = np.clip(self.mv_gain * cmd + self.mv_bias, 0.0, 100.0)
+
+            for i in range(12):
+                self.sim.set_mv(i + 1, float(applied[i]))
+
+            ok = self.sim.step(1)
+            self.t += 1
+
+            xmeas_true_next = self.get_xmeas_true()
+            xmv_next = self.get_xmv()
+
+            # Costs
+            mode_cfg = OPERATING_MODES[int(self.current_mode)]
+            sp = mode_cfg.xmeas_setpoints
+
+            tracking_cost = 0.0
+            for idx, sp_val in sp.items():
+                i = int(idx)
+                err = float(xmeas_true_next[i] - float(sp_val)) / float(_DEF_MAX_XMEAS[i])
+                tracking_cost += err * err
+
+            # Utility proxy: penalize utilities MV deviation from nominal setpoints
+            util_idx = MV_GROUPS["utility"]
+            utilities_cost = float(np.mean(np.abs(xmv_next[util_idx] - mode_cfg.xmv_setpoints[util_idx])))
+
+            mv_move_cost = float(np.mean((xmv_next - self._prev_xmv) ** 2))
+            self._prev_xmv = xmv_next.copy()
+
+            # Constraint violations (hard)
+            lim = cfg.safety
+            if (
+                xmeas_true_next[6] > lim.reactor_pressure_max
+                or xmeas_true_next[8] > lim.reactor_temp_max
+                or xmeas_true_next[12] > lim.sep_pressure_max
+                or xmeas_true_next[15] > lim.stripper_pressure_max
+                or xmeas_true_next[7] > lim.reactor_level_max
+                or xmeas_true_next[7] < lim.reactor_level_min
+            ):
+                violations += 1
+
+            # Soft constraint penalty
+            constraint_cost = 0.0
+            constraint_cost += max(0.0, float(xmeas_true_next[6] - lim.reactor_pressure_max)) / lim.reactor_pressure_max
+            constraint_cost += max(0.0, float(xmeas_true_next[8] - lim.reactor_temp_max)) / lim.reactor_temp_max
+            constraint_cost += max(0.0, float(xmeas_true_next[7] - lim.reactor_level_max)) / max(1.0, lim.reactor_level_max)
+            constraint_cost += max(0.0, float(lim.reactor_level_min - xmeas_true_next[7])) / max(1.0, lim.reactor_level_min)
+
+            w = cfg.weights
+            reward = -(
+                w.tracking * tracking_cost
+                + w.utilities * utilities_cost
+                + w.mv_move * mv_move_cost
+                + w.constraint_violation * constraint_cost
+            )
+            reward_sum += float(reward)
+
+            # Group tracking costs (for fairness analysis)
+            gc = self._tracking_costs_by_group(xmeas_true_next)
+            for k in group_costs_accum:
+                group_costs_accum[k] += float(gc.get(k, 0.0))
+
+            if cfg.record_trace:
+                self._trace["t"].append(self.t)
+                self._trace["mode"].append(self.current_mode)
+                self._trace["xmeas"].append(xmeas_true_next.copy())
+                self._trace["xmv"].append(xmv_next.copy())
+                self._trace["residual"].append(res_filt.copy())
+                self._trace["reward"].append(float(reward))
+
+            if not ok:
+                terminated = True
+                break
+
+        obs_measured = self.get_xmeas_measured()
+
+        res_applied_mean = (res_applied_sum / max(1, res_applied_n)).astype(np.float32)
+
+        info = {
+            "t": int(self.t),
+            "mode": int(self.current_mode),
+            "reward_sum": float(reward_sum),
+            "violations": int(violations),
+            "pre_shield_breaches": int(pre_shield_breaches),
+            "shield_activations": int(shield_activations),
+            "shield_solve_time_ms": float(shield_solve_time_ms),
+            # Residual bookkeeping (useful for identification / debugging)
+            "residual_requested": residual.copy(),
+            "residual_applied": res_applied_mean.copy(),
+            "residual_requested_norm": (residual / float(cfg.residual_max)).copy(),
+            "residual_applied_norm": (res_applied_mean / float(cfg.residual_max)).copy(),
+            "group_tracking_costs": group_costs_accum,
+            "active_disturbances": self.sim.get_active_disturbances(),
+            "mv_gain": self.mv_gain.copy(),
+            "mv_bias": self.mv_bias.copy(),
+        }
+
+        if cfg.record_trace:
+            info["trace"] = self._trace
+
+        return obs_measured, float(reward_sum), bool(terminated), False, info
+
+
+# =============================================================================
+# Gym environments
+# =============================================================================
+class TEPContinuousControlEnv(gym.Env):
+    """Continuous residual control for the TEP."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, config: Optional[TEPConfig] = None, initial_mode: Optional[int] = None):
+        super().__init__()
+        self.config = config or TEPConfig()
+        # Backwards compatibility: some scripts pass `initial_mode` directly.
+        if initial_mode is not None:
+            self.config.initial_mode = int(initial_mode)
+        self.plant = TEPPlant(self.config)
+
+        self._steps = 0
+        self._max_steps = max(1, self.config.episode_length_sec // self.config.control_interval_sec)
+
+        # Action is residual on 12 MVs
+        self.action_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(12,),
+            dtype=np.float32,
+        )
+
+        # Observation: [xmeas_norm(41), xmv_norm(12), mode_onehot(6)]
+        obs_dim = 41 + 12 + 6
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(obs_dim,),
+            dtype=np.float32,
+        )
+
+        self._rng = np.random.default_rng(int(self.config.seed))
+        self._demand_mode = int(self.config.initial_mode)
+
+    def _update_demand(self) -> None:
+        cfg = self.config
+        t = int(self.plant.t)
+
+        # 1) Scheduled demand
+        if cfg.demand_schedule:
+            # Find last schedule entry with time <= t
+            mode = int(cfg.demand_schedule[0][1])
+            for ts, m in cfg.demand_schedule:
+                if int(ts) <= t:
+                    mode = int(m)
+                else:
+                    break
+            self._demand_mode = mode
+            return
+
+        # 2) Stochastic demand changes
+        if cfg.demand_change_prob > 0 and cfg.demand_interval_sec > 0:
+            if t > 0 and (t % int(cfg.demand_interval_sec) == 0):
+                if self._rng.random() < float(cfg.demand_change_prob):
+                    choices = [m for m in range(1, 7) if m != self._demand_mode]
+                    self._demand_mode = int(self._rng.choice(choices))
+
+    def _get_obs(self) -> np.ndarray:
+        xmeas = self.plant.get_xmeas_measured()
+        xmv = self.plant.get_xmv()
+
+        xmeas_norm = xmeas / _DEF_MAX_XMEAS
+        xmv_norm = xmv / _DEF_MAX_XMV
+        mode_onehot = _one_hot(self.plant.current_mode - 1, 6)
+
+        return np.concatenate([xmeas_norm, xmv_norm, mode_onehot]).astype(np.float32)
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+
+        if seed is not None:
+            self.config.seed = int(seed)
+        self._rng = np.random.default_rng(int(self.config.seed))
+
+        # Optionally randomize initial mode (training convenience)
+        init_mode = int(self.config.initial_mode)
+        if self.config.randomize_initial_mode:
+            init_mode = int(self._rng.integers(1, 7))
+
+        self._demand_mode = init_mode
+        self.plant.reset(seed=int(self.config.seed), initial_mode=init_mode)
+
+        self._steps = 0
+        obs = self._get_obs()
+        info = {"t": int(self.plant.t), "mode": int(self.plant.current_mode), "demand_mode": int(self._demand_mode)}
         return obs, info
-    
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Execute one time step within the environment"""
-        
-        # Clip actions to valid range
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        
-        # Apply action to manipulated variables (residual control)
-        self.manipulated_vars += action * 0.1  # Scale factor for stability
-        self.manipulated_vars = np.clip(self.manipulated_vars, 0.0, 100.0)
-        
-        # Update process dynamics
-        self._update_process_dynamics()
-        
-        # Apply scenario-specific disturbances
-        self._apply_scenario_disturbances()
-        
-        # Calculate reward
-        reward = self._calculate_reward()
-        
-        # Check termination conditions
-        terminated = self._check_termination()
-        truncated = self.current_step >= self.config.max_episode_steps
-        
-        # Update step counter
-        self.current_step += 1
-        self.process_time += self.config.dt
-        
-        # Store episode data
-        self.episode_data.append({
-            'step': self.current_step,
-            'time': self.process_time,
-            'measurements': self.measurements.copy(),
-            'manipulated_vars': self.manipulated_vars.copy(),
-            'reward': reward,
-            'economic_cost': self._calculate_economic_cost()
-        })
-        
-        # Get observation and info
-        obs = self._get_observation()
-        info = self._get_info()
-        
-        return obs, reward, terminated, truncated, info
-    
-    def _update_process_dynamics(self):
-        """Update process dynamics based on current state and actions"""
-        
-        # Simplified TEP dynamics (linearized around operating point)
-        # In practice, this would use detailed process models
-        
-        dt = self.config.dt
-        
-        # Reactor dynamics
-        reactor_temp_change = (
-            0.1 * (self.manipulated_vars[9] - 50.0) +  # Cooling effect
-            0.05 * (self.manipulated_vars[0] - 50.0) +  # Feed effect
-            np.random.normal(0, self.config.process_noise_std)
+
+    def step(self, action: np.ndarray):
+        self._steps += 1
+
+        # Scale normalized action to physical residual units
+        a = np.asarray(action, dtype=np.float32).reshape(12)
+        a = np.clip(a, -1.0, 1.0)
+        residual = a * float(self.config.residual_max)
+
+        # Optional training shortcut: force mode to follow demand
+        if self.config.follow_demand_in_training:
+            self._update_demand()
+            self.plant.set_mode(self._demand_mode)
+
+        _, reward_sum, terminated, _, info = self.plant.run(self.config.control_interval_sec, residual)
+
+        obs = self._get_obs()
+
+        truncated = self._steps >= self._max_steps
+        info["demand_mode"] = int(self._demand_mode)
+        return obs, float(reward_sum), bool(terminated), bool(truncated), info
+
+
+class TEPSchedulingEnv(gym.Env):
+    """Scheduling + continuous control environment.
+
+    Scheduler selects a mode (1..6) every `scheduling_interval_sec`. Between
+    scheduler decisions, the control policy (residual controller) is applied at
+    `control_interval_sec`.
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(
+        self,
+        config: Optional[TEPConfig] = None,
+        control_policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        initial_mode: Optional[int] = None,
+    ):
+        super().__init__()
+        self.config = config or TEPConfig()
+        # Backwards compatibility: some scripts pass `initial_mode` directly.
+        if initial_mode is not None:
+            self.config.initial_mode = int(initial_mode)
+        self.plant = TEPPlant(self.config)
+
+        self.control_policy = control_policy
+
+        self._rng = np.random.default_rng(int(self.config.seed))
+        self._demand_mode = int(self.config.initial_mode)
+        self._steps = 0
+
+        self._max_steps = max(1, self.config.episode_length_sec // self.config.scheduling_interval_sec)
+
+        # Scheduler action: choose one of 6 modes
+        self.action_space = spaces.Discrete(6)
+
+        # Observation: [xmeas_norm(41), xmv_norm(12), current_mode_onehot(6), demand_onehot(6), readiness(3)]
+        obs_dim = 41 + 12 + 6 + 6 + 3
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(obs_dim,),
+            dtype=np.float32,
         )
-        self.measurements[8] += reactor_temp_change * dt / 60.0  # Convert to per-second
-        
-        # Separator dynamics
-        separator_level_change = (
-            0.2 * (self.manipulated_vars[6] - 50.0) +  # Liquid valve effect
-            0.1 * (self.measurements[5] - 50.0) +  # Feed rate effect
-            np.random.normal(0, self.config.process_noise_std)
-        )
-        self.measurements[11] += separator_level_change * dt / 60.0
-        
-        # Stripper dynamics
-        stripper_level_change = (
-            0.3 * (self.manipulated_vars[7] - 50.0) +  # Product valve effect
-            0.15 * (self.manipulated_vars[8] - 50.0) +  # Steam effect
-            np.random.normal(0, self.config.process_noise_std)
-        )
-        self.measurements[14] += stripper_level_change * dt / 60.0
-        
-        # Composition dynamics (simplified)
-        for i in range(22, 28):  # Product compositions
-            comp_change = np.random.normal(0, self.config.process_noise_std * 0.1)
-            self.measurements[i] += comp_change * dt / 60.0
-            self.measurements[i] = np.clip(self.measurements[i], 0.0, 100.0)
-        
-        # Apply measurement noise
-        noise = np.random.normal(0, self.config.measurement_noise_std, len(self.measurements))
-        self.measurements += noise
-        
-        # Ensure physical constraints
-        self.measurements[8] = np.clip(self.measurements[8], 100.0, 200.0)  # Reactor temp
-        self.measurements[11] = np.clip(self.measurements[11], 0.0, 100.0)  # Separator level
-        self.measurements[14] = np.clip(self.measurements[14], 0.0, 100.0)  # Stripper level
-        self.measurements[12] = np.clip(self.measurements[12], 2000.0, 4000.0)  # Separator pressure
-    
-    def _apply_scenario_disturbances(self):
-        """Apply scenario-specific disturbances and faults"""
-        
-        current_time_minutes = self.process_time / 60.0
-        
-        # Apply disturbances based on scenario
-        for disturbance_name, start_time, end_time in self.current_scenario_config['disturbances']:
-            if start_time <= current_time_minutes <= end_time:
-                self._apply_disturbance(disturbance_name)
-        
-        # Apply faults based on scenario
-        for fault_name, start_time, end_time in self.current_scenario_config['faults']:
-            if start_time <= current_time_minutes <= end_time:
-                self._apply_fault(fault_name)
-        
-        # Apply grade changes
-        for change_time, new_mode in self.current_scenario_config['grade_changes']:
-            if abs(current_time_minutes - change_time) < 1.0:  # Within 1 minute
-                self.current_production_mode = new_mode
-                logger.info(f"Production mode changed to {new_mode.value} at time {current_time_minutes:.1f} min")
-    
-    def _apply_disturbance(self, disturbance_name: str):
-        """Apply specific disturbance to the process"""
-        
-        if disturbance_name == 'feed_composition_drift':
-            # Gradual drift in feed composition
-            drift_rate = 0.001  # %/min
-            self.measurements[22] += drift_rate * self.config.dt / 60.0
-            
-        elif disturbance_name == 'reactor_cooling_loss':
-            # Temporary loss of cooling effectiveness
-            self.measurements[8] += 2.0 * self.config.dt / 60.0  # Temperature rise
-            
-        elif disturbance_name == 'composition_sensor_bias':
-            # Sensor bias in composition measurement
-            self.measurements[25] += 1.0  # Constant bias
-    
-    def _apply_fault(self, fault_name: str):
-        """Apply specific fault to the process"""
-        
-        if fault_name == 'random_fault_1':
-            # Random valve sticking
-            stuck_valve = np.random.randint(0, len(self.manipulated_vars))
-            self.manipulated_vars[stuck_valve] = 50.0  # Stuck at 50%
-            
-        elif fault_name == 'random_fault_2':
-            # Random sensor failure
-            failed_sensor = np.random.randint(0, len(self.measurements))
-            self.measurements[failed_sensor] = np.nan  # Sensor failure
-    
-    def _calculate_reward(self) -> float:
-        """Calculate reward based on economic performance and constraints"""
-        
-        # Economic cost component
-        economic_cost = self._calculate_economic_cost()
-        
-        # Constraint violation penalty
-        constraint_penalty = self._calculate_constraint_penalty()
-        
-        # Off-specification penalty
-        off_spec_penalty = self._calculate_off_spec_penalty()
-        
-        # Total reward (negative cost)
-        reward = -(economic_cost + constraint_penalty + off_spec_penalty)
-        
-        # Update totals
-        self.total_economic_cost += economic_cost
-        if off_spec_penalty > 0:
-            self.total_off_spec_time += self.config.dt / 3600.0  # Convert to hours
-        
-        return reward
-    
-    def _calculate_economic_cost(self) -> float:
-        """Calculate economic cost for current time step"""
-        
-        # Production rate (simplified)
-        production_rate = self.measurements[13]  # Product separator underflow
-        
-        # Raw material consumption
-        raw_material_rate = sum(self.measurements[0:4])  # Feed flows
-        
-        # Energy consumption
-        energy_rate = (
-            self.measurements[19] +  # Compressor work
-            self.measurements[18] +  # Steam flow
-            abs(self.measurements[20] - 80.0)  # Cooling deviation
-        )
-        
-        # Calculate costs (per time step)
-        production_value = production_rate * self.config.product_value * self.config.dt / 3600.0
-        raw_material_cost = raw_material_rate * self.config.raw_material_cost * self.config.dt / 3600.0
-        energy_cost = energy_rate * self.config.energy_cost * self.config.dt / 3600.0
-        
-        # Net cost (negative profit)
-        net_cost = raw_material_cost + energy_cost - production_value
-        
-        return net_cost
-    
-    def _calculate_constraint_penalty(self) -> float:
-        """Calculate penalty for constraint violations"""
-        
-        penalty = 0.0
-        
-        if self.config.enable_safety_constraints:
-            # Reactor temperature constraint
-            if self.measurements[8] > self.config.max_reactor_temp:
-                penalty += self.config.constraint_violation_penalty
-                self.constraint_violations += 1
-            
-            # Separator pressure constraint
-            if self.measurements[12] > self.config.max_separator_pressure:
-                penalty += self.config.constraint_violation_penalty
-                self.constraint_violations += 1
-            
-            # Stripper level constraints
-            if (self.measurements[14] > self.config.max_stripper_level or 
-                self.measurements[14] < self.config.min_stripper_level):
-                penalty += self.config.constraint_violation_penalty
-                self.constraint_violations += 1
-        
-        return penalty
-    
-    def _calculate_off_spec_penalty(self) -> float:
-        """Calculate penalty for off-specification production"""
-        
-        # Get current production targets
-        targets = self.production_targets[self.current_production_mode]
-        
-        # Calculate composition deviations
-        d_product_actual = self.measurements[36]  # D product composition
-        e_product_actual = self.measurements[37]  # E product composition
-        
-        d_target = targets['D_product'] * 100.0
-        e_target = targets['E_product'] * 100.0
-        
-        # Calculate off-spec penalty
-        d_deviation = abs(d_product_actual - d_target)
-        e_deviation = abs(e_product_actual - e_target)
-        
-        # Penalty if deviation exceeds tolerance
-        tolerance = 5.0  # 5% tolerance
-        penalty = 0.0
-        
-        if d_deviation > tolerance or e_deviation > tolerance:
-            penalty = self.config.off_spec_penalty * self.config.dt / 3600.0
-        
-        return penalty
-    
-    def _check_termination(self) -> bool:
-        """Check if episode should terminate due to safety violations"""
-        
-        # Terminate if critical safety limits are exceeded
-        if self.measurements[8] > 200.0:  # Critical reactor temperature
-            logger.warning("Episode terminated: Critical reactor temperature exceeded")
-            return True
-        
-        if self.measurements[12] > 4000.0:  # Critical separator pressure
-            logger.warning("Episode terminated: Critical separator pressure exceeded")
-            return True
-        
-        return False
-    
-    def _get_observation(self) -> np.ndarray:
-        """Get current observation"""
-        
-        # Combine measurements with additional state information
-        additional_state = np.array([
-            self.process_time / 3600.0,  # Time in hours
-            self.current_production_mode.value == ProductionMode.GRADE_A.value,
-            self.current_production_mode.value == ProductionMode.GRADE_B.value,
-            self.current_production_mode.value == ProductionMode.GRADE_C.value,
-            self.total_economic_cost / 10000.0,  # Normalized economic cost
-            self.total_off_spec_time,
-            self.constraint_violations,
-            np.mean(self.manipulated_vars),  # Average manipulated variable
-            np.std(self.manipulated_vars),   # Manipulated variable variance
-            len(self.episode_data)  # Episode progress
-        ])
-        
-        obs = np.concatenate([self.measurements, additional_state])
-        
-        # Handle NaN values (sensor failures)
-        obs = np.nan_to_num(obs, nan=0.0)
-        
-        return obs.astype(np.float32)
-    
-    def _get_info(self) -> Dict:
-        """Get additional information about current state"""
-        
-        return {
-            'process_time': self.process_time,
-            'production_mode': self.current_production_mode.value,
-            'economic_cost': self.total_economic_cost,
-            'off_spec_time': self.total_off_spec_time,
-            'constraint_violations': self.constraint_violations,
-            'measurements': self.measurements.copy(),
-            'manipulated_vars': self.manipulated_vars.copy(),
-            'scenario': self.scenario.value
-        }
-    
-    def _apply_initial_randomization(self):
-        """Apply initial randomization to process state"""
-        
-        # Add random variations to initial conditions
-        measurement_variation = np.random.normal(0, 0.05, len(self.measurements))
-        self.measurements += measurement_variation * self.measurements
-        
-        manipulated_variation = np.random.normal(0, 0.02, len(self.manipulated_vars))
-        self.manipulated_vars += manipulated_variation * self.manipulated_vars
-        
-        # Ensure constraints are still satisfied
-        self.measurements = np.clip(self.measurements, 0.0, 1000.0)
-        self.manipulated_vars = np.clip(self.manipulated_vars, 0.0, 100.0)
-    
-    def get_episode_data(self) -> List[Dict]:
-        """Get complete episode data for analysis"""
-        return self.episode_data.copy()
-    
-    def get_performance_metrics(self) -> Dict:
-        """Get performance metrics for current episode"""
-        
-        if not self.episode_data:
-            return {}
-        
-        rewards = [d['reward'] for d in self.episode_data]
-        economic_costs = [d['economic_cost'] for d in self.episode_data]
-        
-        return {
-            'total_reward': sum(rewards),
-            'average_reward': np.mean(rewards),
-            'total_economic_cost': sum(economic_costs),
-            'average_economic_cost': np.mean(economic_costs),
-            'total_off_spec_time': self.total_off_spec_time,
-            'constraint_violations': self.constraint_violations,
-            'episode_length': len(self.episode_data),
-            'final_production_mode': self.current_production_mode.value
+
+    def _update_demand(self) -> None:
+        cfg = self.config
+        t = int(self.plant.t)
+
+        if cfg.demand_schedule:
+            mode = int(cfg.demand_schedule[0][1])
+            for ts, m in cfg.demand_schedule:
+                if int(ts) <= t:
+                    mode = int(m)
+                else:
+                    break
+            self._demand_mode = mode
+            return
+
+        if cfg.demand_change_prob > 0 and cfg.demand_interval_sec > 0:
+            if t > 0 and (t % int(cfg.demand_interval_sec) == 0):
+                if self._rng.random() < float(cfg.demand_change_prob):
+                    choices = [m for m in range(1, 7) if m != self._demand_mode]
+                    self._demand_mode = int(self._rng.choice(choices))
+
+    def _compute_readiness(self, xmeas_true: np.ndarray) -> np.ndarray:
+        # Readiness is a soft signal: closer to setpoints => higher readiness.
+        mode_cfg = OPERATING_MODES[int(self.plant.current_mode)]
+        sp = mode_cfg.xmeas_setpoints
+
+        group_meas = {
+            "feed": {0, 1, 2, 3, 4, 5, 9, 39, 40},
+            "separator": {11, 12, 14, 15, 7},
+            "utility": {6, 8, 10, 17, 18, 19, 20, 21},
         }
 
+        errs = []
+        for g in ["feed", "separator", "utility"]:
+            e = 0.0
+            n = 0
+            for idx, sp_val in sp.items():
+                i = int(idx)
+                if i in group_meas[g]:
+                    err = float(xmeas_true[i] - float(sp_val)) / float(_DEF_MAX_XMEAS[i])
+                    e += err * err
+                    n += 1
+            if n > 0:
+                e /= n
+            errs.append(e)
 
-# Test the environment
-if __name__ == "__main__":
-    # Create environment
-    env = TEPEnvironment(scenario=ScenarioType.S1_BASIC_CHANGES)
-    
-    print(f"Observation space: {env.observation_space}")
-    print(f"Action space: {env.action_space}")
-    
-    # Test reset
-    obs, info = env.reset()
-    print(f"Initial observation shape: {obs.shape}")
-    print(f"Initial info: {info}")
-    
-    # Test a few steps
-    for step in range(5):
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        print(f"Step {step}: reward={reward:.3f}, terminated={terminated}, truncated={truncated}")
-        
-        if terminated or truncated:
-            break
-    
-    # Get performance metrics
-    metrics = env.get_performance_metrics()
-    print(f"Performance metrics: {metrics}")
-    
-    print("TEP Environment test completed successfully!")
+        # Map error to readiness in (0,1]
+        readiness = np.exp(-10.0 * np.asarray(errs, dtype=np.float32))
+        return readiness.astype(np.float32)
 
+    def _get_obs(self) -> np.ndarray:
+        xmeas_meas = self.plant.get_xmeas_measured()
+        xmeas_true = self.plant.get_xmeas_true()
+        xmv = self.plant.get_xmv()
+
+        xmeas_norm = xmeas_meas / _DEF_MAX_XMEAS
+        xmv_norm = xmv / _DEF_MAX_XMV
+
+        mode_onehot = _one_hot(self.plant.current_mode - 1, 6)
+        demand_onehot = _one_hot(self._demand_mode - 1, 6)
+        readiness = self._compute_readiness(xmeas_true)
+
+        return np.concatenate([xmeas_norm, xmv_norm, mode_onehot, demand_onehot, readiness]).astype(np.float32)
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+
+        if seed is not None:
+            self.config.seed = int(seed)
+        self._rng = np.random.default_rng(int(self.config.seed))
+
+        init_mode = int(self.config.initial_mode)
+        self._demand_mode = init_mode
+        self.plant.reset(seed=int(self.config.seed), initial_mode=init_mode)
+
+        self._steps = 0
+        obs = self._get_obs()
+        info = {"t": int(self.plant.t), "mode": int(self.plant.current_mode), "demand_mode": int(self._demand_mode)}
+        return obs, info
+
+    def step(self, action: int):
+        self._steps += 1
+
+        # Update exogenous demand
+        self._update_demand()
+
+        # Scheduler decision: mode in 1..6
+        prev_mode = int(self.plant.current_mode)
+        mode = int(action) + 1
+        self.plant.set_mode(mode)
+
+        # Scheduling penalties (demand adherence + switching)
+        mismatch = 1 if int(mode) != int(self._demand_mode) else 0
+        switched = 1 if int(mode) != int(prev_mode) else 0
+
+        # Run control for one scheduling interval
+        interval = int(self.config.scheduling_interval_sec)
+        n_ctrl = max(1, interval // int(self.config.control_interval_sec))
+
+        reward_total = 0.0
+        terminated = False
+        violations_total = 0
+        pre_breach_total = 0
+        shield_act_total = 0
+        shield_time_total = 0.0
+
+        group_costs = {"feed": 0.0, "separator": 0.0, "utility": 0.0}
+
+        for _ in range(n_ctrl):
+            # Control obs for the residual controller: same as continuous env obs
+            obs_control = np.concatenate([
+                (self.plant.get_xmeas_measured() / _DEF_MAX_XMEAS),
+                (self.plant.get_xmv() / _DEF_MAX_XMV),
+                _one_hot(self.plant.current_mode - 1, 6),
+            ]).astype(np.float32)
+
+            if self.control_policy is None:
+                u = np.zeros(12, dtype=np.float32)
+            else:
+                u = np.asarray(self.control_policy(obs_control), dtype=np.float32).reshape(12)
+                u = np.clip(u, -1.0, 1.0)
+
+            residual = u * float(self.config.residual_max)
+
+            _, r, term, _, info = self.plant.run(self.config.control_interval_sec, residual)
+            reward_total += float(r)
+            terminated = bool(terminated or term)
+
+            violations_total += int(info.get("violations", 0))
+            pre_breach_total += int(info.get("pre_shield_breaches", 0))
+            shield_act_total += int(info.get("shield_activations", 0))
+            shield_time_total += float(info.get("shield_solve_time_ms", 0.0))
+
+            gc = info.get("group_tracking_costs", {})
+            for k in group_costs:
+                group_costs[k] += float(gc.get(k, 0.0))
+
+            if terminated:
+                break
+
+        # Apply scheduling penalties once per decision.
+        w = self.config.weights
+        reward_total -= float(w.demand_mismatch) * float(mismatch)
+        reward_total -= float(w.mode_switch) * float(switched)
+
+        obs = self._get_obs()
+
+        truncated = self._steps >= self._max_steps
+
+        info_out = {
+            "t": int(self.plant.t),
+            "mode": int(self.plant.current_mode),
+            "demand_mode": int(self._demand_mode),
+            "demand_mismatch": int(mismatch),
+            "demand_mismatch_seconds": int(mismatch) * int(interval),
+            "mode_switch": int(switched),
+            "violations": int(violations_total),
+            "pre_shield_breaches": int(pre_breach_total),
+            "shield_activations": int(shield_act_total),
+            "shield_solve_time_ms": float(shield_time_total),
+            "group_tracking_costs": group_costs,
+            "active_disturbances": self.plant.sim.get_active_disturbances(),
+        }
+
+        return obs, float(reward_total), bool(terminated), bool(truncated), info_out
+
+
+# =============================================================================
+# Helper: create scenario-specific configs
+# =============================================================================
+def apply_scenario_to_config(base: TEPConfig, scenario: ScenarioDefinition) -> TEPConfig:
+    """Return a copy of base config with scenario fields applied."""
+
+    cfg = TEPConfig(**{k: getattr(base, k) for k in base.__dataclass_fields__.keys()})
+
+    cfg.scenario = scenario.scenario
+    cfg.initial_mode = int(scenario.initial_mode)
+    cfg.demand_schedule = list(scenario.demand_schedule)
+    cfg.disturbances = list(scenario.disturbances)
+    cfg.sensor_bias = dict(scenario.sensor_bias)
+    cfg.mv_gain_sigma = float(scenario.mv_gain_sigma)
+    cfg.mv_bias_sigma = float(scenario.mv_bias_sigma)
+
+    return cfg

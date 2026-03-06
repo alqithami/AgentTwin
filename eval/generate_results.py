@@ -1,1021 +1,882 @@
+"""Evaluate trained AgentTwin models and generate tables/figures.
+
+Outputs
+-------
+- results/raw/*.csv: per-episode metrics (one row per episode)
+- results/tables/*.csv: aggregated tables (mean ± std)
+- results/tables/*.tex: LaTeX-ready versions of the tables
+- results/plots/*.png, *.pdf: B/W figures with a single accent color
+
+Typical usage
+-------------
+1) Train:
+    python -m train.training_pipeline --config configs/paper.yaml --seed 0
+2) Evaluate:
+    python -m eval.generate_results --config configs/paper.yaml --artifacts_root artifacts --results_dir results
+
+Note
+----
+This evaluation uses the **vendored real TE simulator** under `third_party/tep`.
 """
-Experimental Results Generation for Multi-Agent Digital Twin
 
-This script generates all experimental results and publication-quality plots
-for the multi-agent digital twin paper.
+from __future__ import annotations
 
-Key Features:
-- Complete experimental evaluation across all scenarios
-- Baseline comparisons with statistical significance testing
-- Ablation studies for safety shield and coordination
-- Publication-quality plots and tables
-- Reproducible results with proper seeding
-
-Author: Implementation for Multi-Agent Digital Twin Research
-"""
+import argparse
+import json
+import math
+import hashlib
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-import json
-import time
-import logging
-from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass, asdict
-import argparse
-from datetime import datetime
-from scipy import stats
-import warnings
-warnings.filterwarnings('ignore')
 
-# Import our modules
-from train.training_pipeline import (
-    TrainingPipeline, ExperimentConfig, create_experiment_configs
-)
-from agents.multi_agent_system import (
-    AgentConfig, TrainingConfig, create_default_agent_configs
+from envs import (
+    MV_GROUPS,
+    TEPConfig,
+    TEPSchedulingEnv,
+    ScenarioDefinition,
+    ScenarioType,
+    apply_scenario_to_config,
+    get_scenario_set,
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Stable-Baselines3
+try:
+    from stable_baselines3 import PPO, SAC
+except ImportError as e:  # pragma: no cover
+    raise ImportError(
+        "stable-baselines3 is required for evaluation. Install via: pip install -r requirements.txt"
+    ) from e
 
 
-@dataclass
-class ExperimentalResults:
-    """Container for experimental results"""
-    experiment_name: str
-    scenario_results: Dict[str, Dict]
-    baseline_results: Dict[str, Dict]
-    ablation_results: Dict[str, Dict]
-    training_metrics: Dict[str, Any]
-    statistical_tests: Dict[str, Any]
-    timestamp: str
+ACCENT_COLOR = "tab:red"  # single non-grayscale highlight
 
 
-class ResultsGenerator:
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+def _ensure_dir(p: Path) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_yaml(path: Path) -> dict:
+    import yaml
+
+    return yaml.safe_load(path.read_text())
+
+
+def _scenario_fingerprint(scenario: ScenarioDefinition) -> str:
+    """Stable fingerprint to help verify that scenarios actually differ."""
+
+    payload = {
+        "scenario": str(scenario.scenario.value),
+        "initial_mode": int(scenario.initial_mode),
+        "demand_schedule": [(int(t), int(m)) for (t, m) in scenario.demand_schedule],
+        "disturbances": [(int(i), int(on), int(dur)) for (i, on, dur) in scenario.disturbances],
+        "sensor_bias": {str(k): float(v) for k, v in scenario.sensor_bias.items()},
+        "mv_gain_sigma": float(scenario.mv_gain_sigma),
+        "mv_bias_sigma": float(scenario.mv_bias_sigma),
+    }
+    s = json.dumps(payload, sort_keys=True)
+    return hashlib.md5(s.encode("utf-8")).hexdigest()[:10]
+
+def _save_figure(plots_dir: Path, basename: str) -> None:
+    """Save the current Matplotlib figure as PNG and PDF."""
+    plt.savefig(plots_dir / f"{basename}.png", dpi=300)
+    plt.savefig(plots_dir / f"{basename}.pdf")
+
+
+
+
+
+def _method_style(name: str) -> Dict[str, object]:
+    """Return style primitives for B/W plots with one accent color.
+
+    Keys returned:
+      - facecolor, edgecolor, hatch: for bar charts
+      - linecolor, linestyle, marker, linewidth: for line charts
     """
-    Comprehensive results generator for multi-agent digital twin research
-    
-    This class orchestrates all experimental evaluations and generates
-    publication-quality results for the research paper.
-    """
-    
-    def __init__(self, output_dir: str = "./results"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Setup logging
-        self.setup_logging()
-        
-        # Results storage
-        self.all_results = {}
-        self.statistical_comparisons = {}
-        
-        # Plot settings
-        self.setup_plot_style()
-        
-        logger.info(f"Results generator initialized: {self.output_dir}")
-    
-    def setup_logging(self):
-        """Setup comprehensive logging for experiments"""
-        log_dir = self.output_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
-        
-        log_file = log_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
-        
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        
-        logger.addHandler(file_handler)
-    
-    def setup_plot_style(self):
-        """Setup publication-quality plot style"""
-        # Set style for publication
-        plt.style.use('seaborn-v0_8-whitegrid')
-        sns.set_palette("husl")
-        
-        # Font settings for publication
-        plt.rcParams.update({
-            'font.size': 12,
-            'axes.titlesize': 14,
-            'axes.labelsize': 12,
-            'xtick.labelsize': 10,
-            'ytick.labelsize': 10,
-            'legend.fontsize': 10,
-            'figure.titlesize': 16,
-            'font.family': 'serif',
-            'font.serif': ['Times New Roman', 'DejaVu Serif'],
-            'mathtext.fontset': 'stix',
-            'figure.dpi': 300,
-            'savefig.dpi': 300,
-            'savefig.bbox': 'tight',
-            'savefig.pad_inches': 0.1
-        })
+    key = str(name).lower().strip()
 
-    @staticmethod
-    def _format_metric(mean: Optional[float], std: Optional[float], bold: bool = False) -> str:
-        if mean is None or std is None:
-            return "N/A"
-        value = f"{mean:.3f} ± {std:.3f}"
-        return f"**{value}**" if bold else value
-
-    @staticmethod
-    def _get_metric(summary: Dict[str, Any], key: str) -> Tuple[Optional[float], Optional[float]]:
-        return summary.get(f"{key}_mean"), summary.get(f"{key}_std")
-    
-    def run_main_experiments(self, quick: bool = False) -> Dict[str, ExperimentalResults]:
-        """Run main experimental evaluation"""
-        logger.info("Starting main experimental evaluation...")
-        experiments = {
-            'full_system': self._run_full_system_experiment(quick=quick)
-        }
-
-        if not quick:
-            experiments.update({
-                'safety_ablation': self._run_safety_ablation_experiment(),
-                'coordination_ablation': self._run_coordination_ablation_experiment(),
-                'baseline_comparison': self._run_baseline_comparison_experiment()
-            })
-        
-        logger.info("Main experimental evaluation completed")
-        return experiments
-
-    def run_evaluation_from_checkpoint(self, checkpoint_dir: str, quick: bool = False) -> Dict[str, ExperimentalResults]:
-        """Run evaluation using a pre-trained checkpoint without retraining."""
-        logger.info("Running evaluation from checkpoint...")
-
-        experiment_config = ExperimentConfig(
-            experiment_name='full_system',
-            scenario='S1',
-            enable_behavior_cloning=False,
-            enable_individual_training=False,
-            enable_joint_training=False,
-            enable_safety_shield=True,
-            n_eval_episodes=3 if quick else 10,
-            eval_scenarios=['S1'] if quick else ['S1', 'S2', 'S3', 'S4', 'S5']
-        )
-
-        agent_configs = create_default_agent_configs()
-        training_config = TrainingConfig(
-            total_timesteps=0,
-            eval_freq=1000,
-            n_eval_episodes=3 if quick else 10
-        )
-
-        pipeline = TrainingPipeline(
-            experiment_config=experiment_config,
-            agent_configs=agent_configs,
-            training_config=training_config,
-            output_dir=str(self.output_dir / "experiments")
-        )
-
-        pipeline.initialize_components()
-        pipeline.ma_system.load_system(checkpoint_dir)
-        pipeline.run_comprehensive_evaluation()
-
-        scenario_results = pipeline.training_history['evaluation'].get('scenario_results', {})
-
+    # Highlight the proposed method with the single accent color
+    if key.startswith("agenttwin"):
         return {
-            'full_system': ExperimentalResults(
-                experiment_name='full_system',
-                scenario_results=scenario_results,
-                baseline_results=scenario_results.get('baselines', {}),
-                ablation_results={},
-                training_metrics={},
-                statistical_tests={},
-                timestamp=datetime.now().isoformat()
-            )
+            "facecolor": ACCENT_COLOR,
+            "edgecolor": "black",
+            "hatch": None,
+            "linecolor": ACCENT_COLOR,
+            "linestyle": "-",
+            "marker": "D",
+            "linewidth": 2.6,
         }
-    
-    def _run_full_system_experiment(self, quick: bool = False) -> ExperimentalResults:
-        """Run full multi-agent system experiment"""
-        logger.info("Running full system experiment...")
-        
-        # Create experiment configuration
-        experiment_config = ExperimentConfig(
-            experiment_name='full_system',
-            scenario='S1',
-            enable_behavior_cloning=True,
-            enable_individual_training=True,
-            enable_joint_training=True,
-            enable_safety_shield=True,
-            n_eval_episodes=3 if quick else 10,
-            eval_scenarios=['S1'] if quick else ['S1', 'S2', 'S3', 'S4', 'S5']
-        )
-        
-        # Create agent configurations
-        agent_configs = create_default_agent_configs()
-        
-        # Create training configuration
-        training_config = TrainingConfig(
-            total_timesteps=5000 if quick else 50000,
-            eval_freq=10000,
-            n_eval_episodes=3 if quick else 10
-        )
-        
-        # Run training pipeline
-        pipeline = TrainingPipeline(
-            experiment_config=experiment_config,
-            agent_configs=agent_configs,
-            training_config=training_config,
-            output_dir=str(self.output_dir / "experiments")
-        )
-        
-        results = pipeline.run_complete_pipeline()
-        
-        # Extract results
-        scenario_results = {}
-        if 'evaluation' in pipeline.training_history:
-            scenario_results = pipeline.training_history['evaluation'].get('scenario_results', {})
-        
-        return ExperimentalResults(
-            experiment_name='full_system',
-            scenario_results=scenario_results,
-            baseline_results=scenario_results.get('baselines', {}),
-            ablation_results={},
-            training_metrics=results,
-            statistical_tests={},
-            timestamp=datetime.now().isoformat()
-        )
-    
-    def _run_safety_ablation_experiment(self) -> ExperimentalResults:
-        """Run safety shield ablation study"""
-        logger.info("Running safety ablation experiment...")
-        
-        # Create experiment configuration without safety shield
-        experiment_config = ExperimentConfig(
-            experiment_name='safety_ablation',
-            scenario='S1',
-            enable_behavior_cloning=True,
-            enable_individual_training=True,
-            enable_joint_training=True,
-            enable_safety_shield=False,  # No safety shield
-            n_eval_episodes=10,
-            eval_scenarios=['S1', 'S2', 'S3']
-        )
-        
-        # Create agent configurations
-        agent_configs = create_default_agent_configs()
-        
-        # Create training configuration
-        training_config = TrainingConfig(
-            total_timesteps=30000,  # Reduced for ablation
-            eval_freq=10000,
-            n_eval_episodes=10
-        )
-        
-        # Run training pipeline
-        pipeline = TrainingPipeline(
-            experiment_config=experiment_config,
-            agent_configs=agent_configs,
-            training_config=training_config,
-            output_dir=str(self.output_dir / "experiments")
-        )
-        
-        results = pipeline.run_complete_pipeline()
-        
-        # Extract results
-        scenario_results = {}
-        if 'evaluation' in pipeline.training_history:
-            scenario_results = pipeline.training_history['evaluation'].get('scenario_results', {})
-        
-        return ExperimentalResults(
-            experiment_name='safety_ablation',
-            scenario_results=scenario_results,
-            baseline_results={},
-            ablation_results={'safety_disabled': scenario_results},
-            training_metrics=results,
-            statistical_tests={},
-            timestamp=datetime.now().isoformat()
-        )
-    
-    def _run_coordination_ablation_experiment(self) -> ExperimentalResults:
-        """Run coordination mechanism ablation study"""
-        logger.info("Running coordination ablation experiment...")
-        
-        # Create simplified agent configuration (single agent)
-        agent_configs = {
-            "reactor_controller": AgentConfig(
-                agent_id="reactor_controller",
-                algorithm="SAC",
-                learning_rate=3e-4,
-                batch_size=256,
-                buffer_size=50000,
-                learning_starts=1000,
-                policy_kwargs={"net_arch": [256, 256]}
-            )
+
+    if key.startswith("pid"):
+        return {
+            "facecolor": "white",
+            "edgecolor": "black",
+            "hatch": "",
+            "linecolor": "black",
+            "linestyle": "-",
+            "marker": "o",
+            "linewidth": 1.8,
         }
-        
-        # Create experiment configuration
-        experiment_config = ExperimentConfig(
-            experiment_name='coordination_ablation',
-            scenario='S1',
-            enable_behavior_cloning=False,
-            enable_individual_training=True,
-            enable_joint_training=False,  # No coordination
-            enable_safety_shield=True,
-            n_eval_episodes=10,
-            eval_scenarios=['S1', 'S2']
-        )
-        
-        # Create training configuration
-        training_config = TrainingConfig(
-            total_timesteps=30000,
-            eval_freq=10000,
-            n_eval_episodes=10
-        )
-        
-        # Run training pipeline
-        pipeline = TrainingPipeline(
-            experiment_config=experiment_config,
-            agent_configs=agent_configs,
-            training_config=training_config,
-            output_dir=str(self.output_dir / "experiments")
-        )
-        
-        results = pipeline.run_complete_pipeline()
-        
-        # Extract results
-        scenario_results = {}
-        if 'evaluation' in pipeline.training_history:
-            scenario_results = pipeline.training_history['evaluation'].get('scenario_results', {})
-        
-        return ExperimentalResults(
-            experiment_name='coordination_ablation',
-            scenario_results=scenario_results,
-            baseline_results={},
-            ablation_results={'no_coordination': scenario_results},
-            training_metrics=results,
-            statistical_tests={},
-            timestamp=datetime.now().isoformat()
-        )
-    
-    def _run_baseline_comparison_experiment(self) -> ExperimentalResults:
-        """Run comprehensive baseline comparison"""
-        logger.info("Running baseline comparison experiment...")
 
-        experiment_config = ExperimentConfig(
-            experiment_name='baseline_comparison',
-            scenario='S1',
-            enable_behavior_cloning=False,
-            enable_individual_training=False,
-            enable_joint_training=False,
-            enable_safety_shield=False,
-            n_eval_episodes=5,
-            eval_scenarios=['S1']
-        )
-
-        agent_configs = create_default_agent_configs()
-        training_config = TrainingConfig(
-            total_timesteps=0,
-            eval_freq=1000,
-            n_eval_episodes=5
-        )
-
-        pipeline = TrainingPipeline(
-            experiment_config=experiment_config,
-            agent_configs=agent_configs,
-            training_config=training_config,
-            output_dir=str(self.output_dir / "experiments")
-        )
-        pipeline.initialize_components()
-        baseline_results = pipeline.evaluate_baseline_controllers()
-        
-        return ExperimentalResults(
-            experiment_name='baseline_comparison',
-            scenario_results={},
-            baseline_results=baseline_results,
-            ablation_results={},
-            training_metrics={},
-            statistical_tests={},
-            timestamp=datetime.now().isoformat()
-        )
-    
-    def perform_statistical_analysis(self, results: Dict[str, ExperimentalResults]) -> Dict[str, Any]:
-        """Perform statistical significance testing"""
-        logger.info("Performing statistical analysis...")
-        
-        statistical_tests = {}
-        
-        def get_episode_metric(result_block: Dict[str, Any], metric_key: str) -> List[float]:
-            return result_block.get("episode_data", {}).get(metric_key, [])
-
-        # Get full system results
-        if 'full_system' in results:
-            full_system = results['full_system']
-            full_s1 = full_system.scenario_results.get('S1', {})
-
-            # Compare with baselines
-            if full_system.baseline_results:
-                full_rewards = get_episode_metric(full_s1, 'episode_rewards')
-                for baseline_name, baseline_data in full_system.baseline_results.items():
-                    baseline_rewards = get_episode_metric(baseline_data, 'episode_rewards')
-                    if full_rewards and baseline_rewards:
-                        t_stat, p_value = stats.ttest_ind(full_rewards, baseline_rewards, equal_var=False)
-                        improvement = ((np.mean(full_rewards) - np.mean(baseline_rewards)) / abs(np.mean(baseline_rewards))) * 100
-                        statistical_tests[f'vs_{baseline_name}'] = {
-                            'improvement_percent': improvement,
-                            't_statistic': t_stat,
-                            'p_value': p_value,
-                            'significant': p_value < 0.05
-                        }
-
-        # Safety ablation analysis
-        if 'safety_ablation' in results and 'full_system' in results:
-            full_s1 = results['full_system'].scenario_results.get('S1', {})
-            safety_s1 = results['safety_ablation'].scenario_results.get('S1', {})
-            full_violations = get_episode_metric(full_s1, 'constraint_violations')
-            safety_violations = get_episode_metric(safety_s1, 'constraint_violations')
-            if full_violations and safety_violations:
-                t_stat, p_value = stats.ttest_ind(full_violations, safety_violations, equal_var=False)
-                reduction = ((np.mean(safety_violations) - np.mean(full_violations)) / max(np.mean(safety_violations), 1e-6)) * 100
-                statistical_tests['safety_impact'] = {
-                    'constraint_reduction_percent': reduction,
-                    't_statistic': t_stat,
-                    'p_value': p_value,
-                    'significant': p_value < 0.05
-                }
-
-        # Coordination ablation analysis
-        if 'coordination_ablation' in results and 'full_system' in results:
-            full_s1 = results['full_system'].scenario_results.get('S1', {})
-            coord_s1 = results['coordination_ablation'].scenario_results.get('S1', {})
-            full_rewards = get_episode_metric(full_s1, 'episode_rewards')
-            coord_rewards = get_episode_metric(coord_s1, 'episode_rewards')
-            if full_rewards and coord_rewards:
-                t_stat, p_value = stats.ttest_ind(full_rewards, coord_rewards, equal_var=False)
-                improvement = ((np.mean(full_rewards) - np.mean(coord_rewards)) / max(abs(np.mean(coord_rewards)), 1e-6)) * 100
-                statistical_tests['coordination_impact'] = {
-                    'performance_improvement_percent': improvement,
-                    't_statistic': t_stat,
-                    'p_value': p_value,
-                    'significant': p_value < 0.05
-                }
-        
-        return statistical_tests
-    
-    def generate_publication_plots(self, results: Dict[str, ExperimentalResults], 
-                                 statistical_tests: Dict[str, Any]):
-        """Generate all publication-quality plots"""
-        logger.info("Generating publication plots...")
-        
-        plots_dir = self.output_dir / "plots"
-        plots_dir.mkdir(exist_ok=True)
-        
-        # Figure 1: System Architecture (will be created separately)
-        # Figure 2: Performance Comparison
-        self._create_performance_comparison_plot(results, plots_dir)
-        
-        # Figure 3: Safety Shield Analysis
-        self._create_safety_analysis_plot(results, statistical_tests, plots_dir)
-        
-        # Figure 4: Scenario Evaluation
-        self._create_scenario_evaluation_plot(results, plots_dir)
-        
-        # Figure 5: Ablation Studies
-        self._create_ablation_studies_plot(results, statistical_tests, plots_dir)
-        
-        # Figure 6: Training Convergence
-        self._create_training_convergence_plot(results, plots_dir)
-        
-        logger.info(f"Publication plots saved to {plots_dir}")
-    
-    def _create_performance_comparison_plot(self, results: Dict[str, ExperimentalResults], 
-                                          plots_dir: Path):
-        """Create Figure 2: Performance Comparison"""
-        full_system = results.get('full_system')
-        if not full_system:
-            logger.warning("Skipping performance comparison plot: full_system results missing.")
-            return
-        s1_results = full_system.scenario_results.get('S1', {})
-        baselines = full_system.baseline_results or {}
-        if not s1_results or not baselines:
-            logger.warning("Skipping performance comparison plot: missing scenario or baseline data.")
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('Performance Comparison: Multi-Agent RL vs Baselines', fontsize=16, fontweight='bold')
-
-        method_labels = []
-        reward_means = []
-        reward_stds = []
-        cost_means = []
-        cost_stds = []
-        violation_means = []
-        violation_stds = []
-        off_spec_means = []
-        off_spec_stds = []
-
-        for name, data in baselines.items():
-            method_labels.append(name.replace('_', ' ').title())
-            reward_means.append(data.get('episode_rewards_mean'))
-            reward_stds.append(data.get('episode_rewards_std'))
-            cost_means.append(data.get('economic_costs_mean'))
-            cost_stds.append(data.get('economic_costs_std'))
-            violation_means.append(data.get('constraint_violations_mean'))
-            violation_stds.append(data.get('constraint_violations_std'))
-            off_spec_means.append(data.get('off_spec_times_mean'))
-            off_spec_stds.append(data.get('off_spec_times_std'))
-
-        method_labels.append('Multi-Agent RL')
-        reward_means.append(s1_results.get('episode_rewards_mean'))
-        reward_stds.append(s1_results.get('episode_rewards_std'))
-        cost_means.append(s1_results.get('economic_costs_mean'))
-        cost_stds.append(s1_results.get('economic_costs_std'))
-        violation_means.append(s1_results.get('constraint_violations_mean'))
-        violation_stds.append(s1_results.get('constraint_violations_std'))
-        off_spec_means.append(s1_results.get('off_spec_times_mean'))
-        off_spec_stds.append(s1_results.get('off_spec_times_std'))
-
-        colors = ['lightcoral'] * (len(method_labels) - 1) + ['gold']
-
-        # Plot 1: Episode Rewards
-        axes[0, 0].bar(method_labels, reward_means, yerr=reward_stds, color=colors, alpha=0.8, capsize=5)
-        axes[0, 0].set_title('Episode Reward', fontweight='bold')
-        axes[0, 0].set_ylabel('Reward')
-        axes[0, 0].tick_params(axis='x', rotation=45)
-        axes[0, 0].grid(True, alpha=0.3)
-
-        # Plot 2: Economic Cost
-        if all(value is not None for value in cost_means):
-            axes[0, 1].bar(method_labels, cost_means, yerr=cost_stds, color=colors, alpha=0.8, capsize=5)
-            axes[0, 1].set_title('Economic Cost', fontweight='bold')
-            axes[0, 1].set_ylabel('Cost')
-            axes[0, 1].tick_params(axis='x', rotation=45)
-            axes[0, 1].grid(True, alpha=0.3)
-        else:
-            axes[0, 1].axis('off')
-
-        # Plot 3: Constraint Violations
-        if all(value is not None for value in violation_means):
-            axes[1, 0].bar(method_labels, violation_means, yerr=violation_stds, color=colors, alpha=0.8, capsize=5)
-            axes[1, 0].set_title('Constraint Violations', fontweight='bold')
-            axes[1, 0].set_ylabel('Violations')
-            axes[1, 0].tick_params(axis='x', rotation=45)
-            axes[1, 0].grid(True, alpha=0.3)
-        else:
-            axes[1, 0].axis('off')
-
-        # Plot 4: Off-Spec Time
-        if all(value is not None for value in off_spec_means):
-            axes[1, 1].bar(method_labels, off_spec_means, yerr=off_spec_stds, color=colors, alpha=0.8, capsize=5)
-            axes[1, 1].set_title('Off-Spec Time', fontweight='bold')
-            axes[1, 1].set_ylabel('Hours')
-            axes[1, 1].tick_params(axis='x', rotation=45)
-            axes[1, 1].grid(True, alpha=0.3)
-        else:
-            axes[1, 1].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'figure2_performance_comparison.png', dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def _create_safety_analysis_plot(self, results: Dict[str, ExperimentalResults], 
-                                   statistical_tests: Dict[str, Any], plots_dir: Path):
-        """Create Figure 3: Safety Shield Analysis"""
-        full_system = results.get('full_system')
-        safety_ablation = results.get('safety_ablation')
-        if not full_system or not safety_ablation:
-            logger.warning("Skipping safety analysis plot: missing full system or safety ablation results.")
-            return
-
-        full_s1 = full_system.scenario_results.get('S1', {})
-        safety_s1 = safety_ablation.scenario_results.get('S1', {})
-        if not full_s1 or not safety_s1:
-            logger.warning("Skipping safety analysis plot: missing S1 results.")
-            return
-
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle('Safety Shield Analysis', fontsize=16, fontweight='bold')
-
-        # Plot 1: Constraint violations comparison
-        labels = ['With Shield', 'Without Shield']
-        violations = [
-            full_s1.get('constraint_violations_mean', 0),
-            safety_s1.get('constraint_violations_mean', 0)
-        ]
-        violation_stds = [
-            full_s1.get('constraint_violations_std', 0),
-            safety_s1.get('constraint_violations_std', 0)
-        ]
-        axes[0].bar(labels, violations, yerr=violation_stds, color=['green', 'red'], alpha=0.7, capsize=5)
-        axes[0].set_title('Constraint Violations (S1)')
-        axes[0].set_ylabel('Violations')
-        axes[0].grid(True, alpha=0.3)
-
-        # Plot 2: Safety interventions comparison
-        interventions = [
-            full_s1.get('safety_interventions_mean', 0),
-            safety_s1.get('safety_interventions_mean', 0)
-        ]
-        intervention_stds = [
-            full_s1.get('safety_interventions_std', 0),
-            safety_s1.get('safety_interventions_std', 0)
-        ]
-        axes[1].bar(labels, interventions, yerr=intervention_stds, color=['blue', 'gray'], alpha=0.7, capsize=5)
-        axes[1].set_title('Safety Interventions (S1)')
-        axes[1].set_ylabel('Interventions')
-        axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'figure3_safety_analysis.png', dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def _create_scenario_evaluation_plot(self, results: Dict[str, ExperimentalResults], 
-                                       plots_dir: Path):
-        """Create Figure 4: Scenario Evaluation"""
-        full_system = results.get('full_system')
-        if not full_system:
-            logger.warning("Skipping scenario evaluation plot: full_system results missing.")
-            return
-
-        scenario_results = {
-            key: value
-            for key, value in full_system.scenario_results.items()
-            if key != 'baselines' and isinstance(value, dict)
+    if "centralized" in key:
+        return {
+            "facecolor": "white",
+            "edgecolor": "black",
+            "hatch": "//",
+            "linecolor": "black",
+            "linestyle": "--",
+            "marker": "s",
+            "linewidth": 1.6,
         }
-        if not scenario_results:
-            logger.warning("Skipping scenario evaluation plot: no scenario results.")
-            return
 
-        scenarios = list(scenario_results.keys())
-        rewards = [scenario_results[s].get('episode_rewards_mean', 0) for s in scenarios]
-        violations = [scenario_results[s].get('constraint_violations_mean', 0) for s in scenarios]
-        off_spec = [scenario_results[s].get('off_spec_times_mean', 0) for s in scenarios]
+    if "multi-agent" in key or "multiagent" in key:
+        return {
+            "facecolor": "white",
+            "edgecolor": "black",
+            "hatch": "xx",
+            "linecolor": "black",
+            "linestyle": ":",
+            "marker": "^",
+            "linewidth": 1.6,
+        }
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle('Multi-Agent Performance Across TEP Scenarios', fontsize=16, fontweight='bold')
+    if "no shield" in key:
+        return {
+            "facecolor": "white",
+            "edgecolor": "black",
+            "hatch": "\\",
+            "linecolor": "black",
+            "linestyle": "-.",
+            "marker": "v",
+            "linewidth": 1.6,
+        }
 
-        axes[0].bar(scenarios, rewards, color='gold', alpha=0.8)
-        axes[0].set_title('Episode Rewards')
-        axes[0].set_ylabel('Reward')
-        axes[0].tick_params(axis='x', rotation=45)
-        axes[0].grid(True, alpha=0.3)
+    if "linmpc" in key:
+        return {
+            "facecolor": "white",
+            "edgecolor": "black",
+            "hatch": "..",
+            "linecolor": "black",
+            "linestyle": "-",
+            "marker": "x",
+            "linewidth": 1.6,
+        }
 
-        axes[1].bar(scenarios, violations, color='red', alpha=0.8)
-        axes[1].set_title('Constraint Violations')
-        axes[1].set_ylabel('Violations')
-        axes[1].tick_params(axis='x', rotation=45)
-        axes[1].grid(True, alpha=0.3)
+    # Default fallback
+    return {
+        "facecolor": "white",
+        "edgecolor": "black",
+        "hatch": "..",
+        "linecolor": "black",
+        "linestyle": "-",
+        "marker": ".",
+        "linewidth": 1.2,
+    }
 
-        axes[2].bar(scenarios, off_spec, color='purple', alpha=0.8)
-        axes[2].set_title('Off-Spec Time')
-        axes[2].set_ylabel('Hours')
-        axes[2].tick_params(axis='x', rotation=45)
-        axes[2].grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'figure4_scenario_evaluation.png', dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def _create_ablation_studies_plot(self, results: Dict[str, ExperimentalResults], 
-                                    statistical_tests: Dict[str, Any], plots_dir: Path):
-        """Create Figure 5: Ablation Studies"""
-        full_system = results.get('full_system')
-        safety_ablation = results.get('safety_ablation')
-        coordination_ablation = results.get('coordination_ablation')
-        if not full_system or not safety_ablation or not coordination_ablation:
-            logger.warning("Skipping ablation plot: missing ablation results.")
-            return
+def _greedy_demand_scheduler(obs: np.ndarray) -> int:
+    # Obs layout: [xmeas(41), xmv(12), mode_onehot(6), demand_onehot(6), readiness(3)]
+    demand = obs[41 + 12 + 6 : 41 + 12 + 6 + 6]
+    return int(np.argmax(demand))
 
-        full_s1 = full_system.scenario_results.get('S1', {})
-        safety_s1 = safety_ablation.scenario_results.get('S1', {})
-        coord_s1 = coordination_ablation.scenario_results.get('S1', {})
-        if not full_s1 or not safety_s1 or not coord_s1:
-            logger.warning("Skipping ablation plot: missing S1 results.")
-            return
 
-        labels = ['Full System', 'No Safety Shield', 'No Coordination']
-        rewards = [
-            full_s1.get('episode_rewards_mean', 0),
-            safety_s1.get('episode_rewards_mean', 0),
-            coord_s1.get('episode_rewards_mean', 0)
-        ]
-        reward_stds = [
-            full_s1.get('episode_rewards_std', 0),
-            safety_s1.get('episode_rewards_std', 0),
-            coord_s1.get('episode_rewards_std', 0)
-        ]
-        violations = [
-            full_s1.get('constraint_violations_mean', 0),
-            safety_s1.get('constraint_violations_mean', 0),
-            coord_s1.get('constraint_violations_mean', 0)
-        ]
-        violation_stds = [
-            full_s1.get('constraint_violations_std', 0),
-            safety_s1.get('constraint_violations_std', 0),
-            coord_s1.get('constraint_violations_std', 0)
-        ]
+def _load_models_for_seed(seed_dir: Path) -> Dict[str, object]:
+    models_dir = seed_dir / "models"
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle('Ablation Studies: Component Impact', fontsize=16, fontweight='bold')
+    out: Dict[str, object] = {}
 
-        axes[0].bar(labels, rewards, yerr=reward_stds, color=['gold', 'lightcoral', 'lightblue'], alpha=0.8, capsize=5)
-        axes[0].set_title('Episode Rewards (S1)')
-        axes[0].set_ylabel('Reward')
-        axes[0].tick_params(axis='x', rotation=30)
-        axes[0].grid(True, alpha=0.3)
+    c_path = models_dir / "centralized_sac.zip"
+    if c_path.exists():
+        out["centralized_sac"] = SAC.load(str(c_path))
 
-        axes[1].bar(labels, violations, yerr=violation_stds, color=['gold', 'red', 'orange'], alpha=0.8, capsize=5)
-        axes[1].set_title('Constraint Violations (S1)')
-        axes[1].set_ylabel('Violations')
-        axes[1].tick_params(axis='x', rotation=30)
-        axes[1].grid(True, alpha=0.3)
+    group_models: Dict[str, SAC] = {}
+    for g in MV_GROUPS.keys():
+        p = models_dir / f"multiagent_sac_{g}.zip"
+        if p.exists():
+            group_models[g] = SAC.load(str(p))
+    if group_models:
+        out["multiagent"] = group_models
 
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'figure5_ablation_studies.png', dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def _create_training_convergence_plot(self, results: Dict[str, ExperimentalResults], 
-                                        plots_dir: Path):
-        """Create Figure 6: Training Convergence"""
-        logger.warning("Skipping training convergence plot: no real training history time series available.")
-    
-    def generate_results_tables(self, results: Dict[str, ExperimentalResults], 
-                              statistical_tests: Dict[str, Any]):
-        """Generate publication-quality results tables"""
-        logger.info("Generating results tables...")
-        
-        tables_dir = self.output_dir / "tables"
-        tables_dir.mkdir(exist_ok=True)
-        
-        # Table 1: Performance Comparison
-        self._create_performance_table(results, statistical_tests, tables_dir)
-        
-        # Table 2: Ablation Study Results
-        self._create_ablation_table(results, statistical_tests, tables_dir)
-        
-        # Table 3: Statistical Significance Tests
-        self._create_statistical_table(statistical_tests, tables_dir)
-        
-        logger.info(f"Results tables saved to {tables_dir}")
-    
-    def _create_performance_table(self, results: Dict[str, ExperimentalResults], 
-                                statistical_tests: Dict[str, Any], tables_dir: Path):
-        """Create Table 1: Performance Comparison"""
-        full_system = results.get('full_system')
-        if not full_system:
-            logger.warning("Skipping performance table: full_system results missing.")
-            return
-        s1_results = full_system.scenario_results.get('S1', {})
-        baselines = full_system.baseline_results or {}
-        if not s1_results or not baselines:
-            logger.warning("Skipping performance table: missing scenario or baseline data.")
-            return
+    s_path = models_dir / "scheduler_ppo.zip"
+    if s_path.exists():
+        out["scheduler_ppo"] = PPO.load(str(s_path))
 
-        rows = []
-        for name, data in baselines.items():
-            rows.append({
-                'Method': name.replace('_', ' ').title(),
-                'Episode Reward': self._format_metric(*self._get_metric(data, 'episode_rewards')),
-                'Economic Cost ($/h)': self._format_metric(*self._get_metric(data, 'economic_costs')),
-                'Constraint Violations': self._format_metric(*self._get_metric(data, 'constraint_violations')),
-                'Off-Spec Time (h)': self._format_metric(*self._get_metric(data, 'off_spec_times')),
-                'Improvement (%)': '-'
-            })
+    return out
 
-        baseline_rewards = [data.get('episode_rewards_mean') for data in baselines.values() if data.get('episode_rewards_mean') is not None]
-        improvement = None
-        if baseline_rewards and s1_results.get('episode_rewards_mean') is not None:
-            best_baseline = max(baseline_rewards)
-            improvement = ((s1_results.get('episode_rewards_mean') - best_baseline) / abs(best_baseline)) * 100
 
-        rows.append({
-            'Method': 'Multi-Agent RL (Ours)',
-            'Episode Reward': self._format_metric(*self._get_metric(s1_results, 'episode_rewards'), bold=True),
-            'Economic Cost ($/h)': self._format_metric(*self._get_metric(s1_results, 'economic_costs'), bold=True),
-            'Constraint Violations': self._format_metric(*self._get_metric(s1_results, 'constraint_violations'), bold=True),
-            'Off-Spec Time (h)': self._format_metric(*self._get_metric(s1_results, 'off_spec_times'), bold=True),
-            'Improvement (%)': f"**{improvement:.2f}**" if improvement is not None else "N/A"
-        })
+def _build_group_control_policy(group_models: Dict[str, SAC], deterministic: bool = True) -> Callable[[np.ndarray], np.ndarray]:
+    def _pi(obs: np.ndarray) -> np.ndarray:
+        a = np.zeros(12, dtype=np.float32)
+        for g, model in group_models.items():
+            idx = MV_GROUPS[g]
+            act, _ = model.predict(obs, deterministic=deterministic)
+            act = np.asarray(act, dtype=np.float32).reshape(len(idx))
+            a[idx] = np.clip(act, -1.0, 1.0)
+        return a
 
-        df = pd.DataFrame(rows)
-        
-        # Save as CSV
-        df.to_csv(tables_dir / 'table1_performance_comparison.csv', index=False)
-        
-        # Save as LaTeX
-        latex_table = df.to_latex(index=False, escape=False, 
-                                 caption='Performance comparison across different control methods on TEP scenarios. Values show mean ± standard deviation over evaluation episodes. Best results in bold.',
-                                 label='tab:performance_comparison')
-        
-        with open(tables_dir / 'table1_performance_comparison.tex', 'w') as f:
-            f.write(latex_table)
-    
-    def _create_ablation_table(self, results: Dict[str, ExperimentalResults], 
-                             statistical_tests: Dict[str, Any], tables_dir: Path):
-        """Create Table 2: Ablation Study Results"""
-        full_system = results.get('full_system')
-        safety_ablation = results.get('safety_ablation')
-        coordination_ablation = results.get('coordination_ablation')
-        if not full_system or not safety_ablation or not coordination_ablation:
-            logger.warning("Skipping ablation table: missing ablation results.")
-            return
+    return _pi
 
-        full_s1 = full_system.scenario_results.get('S1', {})
-        safety_s1 = safety_ablation.scenario_results.get('S1', {})
-        coord_s1 = coordination_ablation.scenario_results.get('S1', {})
-        if not full_s1 or not safety_s1 or not coord_s1:
-            logger.warning("Skipping ablation table: missing S1 results.")
-            return
 
-        rows = [
+# -----------------------------------------------------------------------------
+# Evaluation core
+# -----------------------------------------------------------------------------
+
+def evaluate_method_on_scenario(
+    method_name: str,
+    base_cfg: TEPConfig,
+    scenario: ScenarioDefinition,
+    scheduler_policy: Callable[[np.ndarray], int],
+    control_policy: Optional[Callable[[np.ndarray], np.ndarray]],
+    n_episodes: int,
+    seed_offset: int,
+    deterministic: bool = True,
+    train_seed: int = 0,
+) -> pd.DataFrame:
+    cfg = apply_scenario_to_config(base_cfg, scenario)
+
+    scen_fp = _scenario_fingerprint(scenario)
+
+    env = TEPSchedulingEnv(cfg, control_policy=control_policy)
+
+    rows: List[dict] = []
+    for ep in range(int(n_episodes)):
+        ep_seed = int(seed_offset + ep)
+        obs, _ = env.reset(seed=ep_seed)
+
+        done = False
+        tot_reward = 0.0
+        violations = 0
+        pre_breaches = 0
+        shield_acts = 0
+        solve_ms = 0.0
+        mismatch_seconds = 0
+        mode_switches = 0
+        group_cost_sum = {k: 0.0 for k in MV_GROUPS.keys()}
+
+        t_end = 0
+        done_reason = "truncated"  # overwritten if terminated
+
+        while not done:
+            a_sched = scheduler_policy(obs)
+            obs, r, terminated, truncated, info = env.step(a_sched)
+
+            tot_reward += float(r)
+            violations += int(info.get("violations", 0))
+            pre_breaches += int(info.get("pre_shield_breaches", 0))
+            shield_acts += int(info.get("shield_activations", 0))
+            solve_ms += float(info.get("shield_solve_time_ms", 0.0))
+
+            mismatch_seconds += int(info.get("demand_mismatch_seconds", 0))
+            mode_switches += int(info.get("mode_switch", 0))
+
+            t_end = int(info.get("t", t_end))
+
+            gtc = info.get("group_tracking_costs", {})
+            for g in group_cost_sum.keys():
+                if g in gtc:
+                    group_cost_sum[g] += float(gtc[g])
+
+            done = bool(terminated or truncated)
+            if terminated:
+                done_reason = "terminated"
+
+        # Jain fairness on *costs* (positive): 1.0 is perfectly balanced
+        costs = np.asarray([group_cost_sum[g] for g in MV_GROUPS.keys()], dtype=float)
+        fairness = float(np.nan)
+        if np.all(np.isfinite(costs)) and np.sum(costs) > 0:
+            fairness = float((np.sum(costs) ** 2) / (len(costs) * np.sum(costs**2) + 1e-12))
+
+        rows.append(
             {
-                'Configuration': 'Full System',
-                'Episode Reward': self._format_metric(*self._get_metric(full_s1, 'episode_rewards'), bold=True),
-                'Constraint Violations': self._format_metric(*self._get_metric(full_s1, 'constraint_violations')),
-                'Off-Spec Time (h)': self._format_metric(*self._get_metric(full_s1, 'off_spec_times'))
-            },
-            {
-                'Configuration': 'No Safety Shield',
-                'Episode Reward': self._format_metric(*self._get_metric(safety_s1, 'episode_rewards')),
-                'Constraint Violations': self._format_metric(*self._get_metric(safety_s1, 'constraint_violations')),
-                'Off-Spec Time (h)': self._format_metric(*self._get_metric(safety_s1, 'off_spec_times'))
-            },
-            {
-                'Configuration': 'No Coordination',
-                'Episode Reward': self._format_metric(*self._get_metric(coord_s1, 'episode_rewards')),
-                'Constraint Violations': self._format_metric(*self._get_metric(coord_s1, 'constraint_violations')),
-                'Off-Spec Time (h)': self._format_metric(*self._get_metric(coord_s1, 'off_spec_times'))
+                "method": method_name,
+                "scenario": scenario.scenario.value,
+                "episode": ep,
+                "seed": int(train_seed),
+                "eval_seed": int(ep_seed),
+                "scenario_fp": str(scen_fp),
+                "total_reward": tot_reward,
+                "violations": violations,
+                "pre_shield_breaches": pre_breaches,
+                "shield_activations": shield_acts,
+                "shield_solve_time_ms": solve_ms,
+                "demand_mismatch_seconds": int(mismatch_seconds),
+                "mode_switches": int(mode_switches),
+                "t_end": int(t_end),
+                "done_reason": str(done_reason),
+                "fairness_jain": fairness,
+                **{f"cost_{g}": float(group_cost_sum[g]) for g in MV_GROUPS.keys()},
             }
-        ]
+        )
 
-        df = pd.DataFrame(rows)
-        
-        # Save as CSV
-        df.to_csv(tables_dir / 'table2_ablation_study.csv', index=False)
-        
-        # Save as LaTeX
-        latex_table = df.to_latex(index=False, escape=False,
-                                 caption='Ablation study results using episode-level metrics from the evaluation runs. Values show mean ± standard deviation.',
-                                 label='tab:ablation_study')
-        
-        with open(tables_dir / 'table2_ablation_study.tex', 'w') as f:
-            f.write(latex_table)
-    
-    def _create_statistical_table(self, statistical_tests: Dict[str, Any], tables_dir: Path):
-        """Create Table 3: Statistical Significance Tests"""
-        if not statistical_tests:
-            logger.warning("Skipping statistical table: no statistical tests available.")
-            return
-
-        rows = []
-        for name, data in statistical_tests.items():
-            comparison = name.replace('_', ' ').replace('vs', 'vs').title()
-            improvement = data.get('improvement_percent') or data.get('constraint_reduction_percent') or data.get('performance_improvement_percent')
-            rows.append({
-                'Comparison': comparison,
-                'Improvement (%)': f"{improvement:.2f}" if improvement is not None else "N/A",
-                't-statistic': f"{data.get('t_statistic', 0):.3f}",
-                'p-value': f"{data.get('p_value', 1):.4f}",
-                'Significant': 'Yes' if data.get('significant') else 'No'
-            })
-
-        df = pd.DataFrame(rows)
-        
-        # Save as CSV
-        df.to_csv(tables_dir / 'table3_statistical_tests.csv', index=False)
-        
-        # Save as LaTeX
-        latex_table = df.to_latex(index=False, escape=False,
-                                 caption='Statistical significance tests for performance comparisons using Welch\'s t-test.',
-                                 label='tab:statistical_tests')
-        
-        with open(tables_dir / 'table3_statistical_tests.tex', 'w') as f:
-            f.write(latex_table)
-    
-    def save_comprehensive_results(self, results: Dict[str, ExperimentalResults], 
-                                 statistical_tests: Dict[str, Any]):
-        """Save all results in comprehensive format"""
-        logger.info("Saving comprehensive results...")
-        
-        # Save raw results
-        results_file = self.output_dir / "comprehensive_results.json"
-        with open(results_file, 'w') as f:
-            json.dump({
-                'experiments': {k: asdict(v) for k, v in results.items()},
-                'statistical_tests': statistical_tests,
-                'generation_timestamp': datetime.now().isoformat()
-            }, f, indent=2, default=str)
-        
-        # Create summary report
-        self._create_summary_report(results, statistical_tests)
-        
-        logger.info(f"Comprehensive results saved to {self.output_dir}")
-    
-    def _create_summary_report(self, results: Dict[str, ExperimentalResults], 
-                             statistical_tests: Dict[str, Any]):
-        """Create executive summary report"""
-        full_system = results.get('full_system')
-        s1_results = full_system.scenario_results.get('S1', {}) if full_system else {}
-        baseline_results = full_system.baseline_results if full_system else {}
-        baseline_rewards = [data.get('episode_rewards_mean') for data in baseline_results.values() if data.get('episode_rewards_mean') is not None]
-        best_baseline = max(baseline_rewards) if baseline_rewards else None
-        improvement = None
-        if best_baseline is not None and s1_results.get('episode_rewards_mean') is not None:
-            improvement = ((s1_results.get('episode_rewards_mean') - best_baseline) / abs(best_baseline)) * 100
-
-        safety_stats = statistical_tests.get('safety_impact', {})
-        coord_stats = statistical_tests.get('coordination_impact', {})
-
-        safety_significance = "Yes" if safety_stats.get('significant') else "No"
-        coord_significance = "Yes" if coord_stats.get('significant') else "No"
-
-        report_content = f"""
-# Multi-Agent Digital Twin Experimental Results Summary
-
-**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## Key Findings (Derived from Actual Runs)
-
-### Performance (Scenario S1)
-- Episode reward: {self._format_metric(*self._get_metric(s1_results, 'episode_rewards'))}
-- Economic cost: {self._format_metric(*self._get_metric(s1_results, 'economic_costs'))}
-- Constraint violations: {self._format_metric(*self._get_metric(s1_results, 'constraint_violations'))}
-- Off-spec time: {self._format_metric(*self._get_metric(s1_results, 'off_spec_times'))}
-- Improvement over best baseline: {f"{improvement:.2f}%" if improvement is not None else "N/A"}
-
-### Safety Analysis
-- Constraint reduction vs no-shield: {f"{safety_stats.get('constraint_reduction_percent', 0):.2f}%" if safety_stats else "N/A"}
-- Statistical significance: {safety_significance if safety_stats else "N/A"}
-
-### Coordination Analysis
-- Performance improvement vs no-coordination: {f"{coord_stats.get('performance_improvement_percent', 0):.2f}%" if coord_stats else "N/A"}
-- Statistical significance: {coord_significance if coord_stats else "N/A"}
-
-### Statistical Significance
-- Comparisons reported: {len(statistical_tests)}
-
-## Notes
-- Results above are computed from the actual evaluation episodes executed by this pipeline.
-- Additional plots/tables are generated only when the underlying data is available.
-"""
-        
-        with open(self.output_dir / "executive_summary.md", 'w') as f:
-            f.write(report_content)
+    return pd.DataFrame(rows)
 
 
-def main():
-    """Main results generation script"""
-    parser = argparse.ArgumentParser(description='Generate comprehensive experimental results')
-    parser.add_argument('--output_dir', type=str, default='./results',
-                       help='Output directory for results')
-    parser.add_argument('--quick', action='store_true',
-                       help='Run quick evaluation for testing')
-    parser.add_argument('--checkpoint_dir', type=str, default=None,
-                       help='Path to a saved multi-agent checkpoint directory to evaluate')
-    
+# -----------------------------------------------------------------------------
+# Tables/figures
+# -----------------------------------------------------------------------------
+
+def _mean_std(x: pd.Series) -> str:
+    return f"{x.mean():.2f} ± {x.std(ddof=1):.2f}"
+
+
+def make_tables(all_df: pd.DataFrame, tables_dir: Path) -> None:
+    _ensure_dir(tables_dir)
+
+    # Focus scenario S2 as the primary comparison table
+    s2 = all_df[all_df["scenario"] == ScenarioType.S2_DYNAMIC_DEMAND.value]
+    if s2.empty:
+        s2 = all_df
+
+    perf = (
+        s2.groupby("method")
+        .agg(
+            total_reward_mean=("total_reward", "mean"),
+            total_reward_std=("total_reward", "std"),
+            violations_mean=("violations", "mean"),
+            violations_std=("violations", "std"),
+        )
+        .reset_index()
+    )
+    perf.to_csv(tables_dir / "table1_performance_S2.csv", index=False)
+    perf.to_latex(tables_dir / "table1_performance_S2.tex", index=False, float_format="%.2f")
+
+    safety = (
+        s2.groupby("method")
+        .agg(
+            pre_shield_breaches_mean=("pre_shield_breaches", "mean"),
+            pre_shield_breaches_std=("pre_shield_breaches", "std"),
+            shield_activations_mean=("shield_activations", "mean"),
+            shield_activations_std=("shield_activations", "std"),
+            shield_solve_time_ms_mean=("shield_solve_time_ms", "mean"),
+            shield_solve_time_ms_std=("shield_solve_time_ms", "std"),
+        )
+        .reset_index()
+    )
+
+    # Conditional QP solve time (per activation)
+    if "shield_activations" in s2.columns and "shield_solve_time_ms" in s2.columns:
+        tmp = s2.copy()
+        tmp["solve_ms_when_active"] = tmp["shield_solve_time_ms"] / tmp["shield_activations"].clip(lower=1)
+        cond = (
+            tmp.groupby("method")["solve_ms_when_active"]
+            .agg([("solve_ms_when_active_mean", "mean"), ("solve_ms_when_active_std", "std")])
+            .reset_index()
+        )
+        safety = safety.merge(cond, on="method", how="left")
+    safety.to_csv(tables_dir / "table2_safety_S2.csv", index=False)
+    safety.to_latex(tables_dir / "table2_safety_S2.tex", index=False, float_format="%.2f")
+
+    scen = (
+        all_df.groupby(["scenario", "method"])
+        .agg(total_reward_mean=("total_reward", "mean"), total_reward_std=("total_reward", "std"))
+        .reset_index()
+    )
+    scen.to_csv(tables_dir / "table3_scenarios.csv", index=False)
+    scen.to_latex(tables_dir / "table3_scenarios.tex", index=False, float_format="%.2f")
+
+    fairness = (
+        s2.groupby("method")
+        .agg(fairness_jain_mean=("fairness_jain", "mean"), fairness_jain_std=("fairness_jain", "std"))
+        .reset_index()
+    )
+    fairness.to_csv(tables_dir / "table4_fairness_S2.csv", index=False)
+    fairness.to_latex(tables_dir / "table4_fairness_S2.tex", index=False, float_format="%.3f")
+
+    # Scheduling adherence (only meaningful when demand is nontrivial)
+    if "demand_mismatch_seconds" in s2.columns:
+        sched = (
+            s2.groupby("method")
+            .agg(
+                demand_mismatch_seconds_mean=("demand_mismatch_seconds", "mean"),
+                demand_mismatch_seconds_std=("demand_mismatch_seconds", "std"),
+                mode_switches_mean=("mode_switches", "mean"),
+                mode_switches_std=("mode_switches", "std"),
+            )
+            .reset_index()
+        )
+        sched.to_csv(tables_dir / "table5_scheduling_S2.csv", index=False)
+        sched.to_latex(tables_dir / "table5_scheduling_S2.tex", index=False, float_format="%.2f")
+
+
+def make_plots(all_df: pd.DataFrame, plots_dir: Path) -> None:
+    """Generate B/W plots (PNG + PDF) from the episode-level dataframe.
+
+    The plotting code is deliberately conservative (journal-friendly):
+    - grayscale + one accent color (AgentTwin)
+    - error bars are standard deviation across episodes
+    - large performance gaps (PID vs RL) are handled via split panels
+    """
+
+    _ensure_dir(plots_dir)
+
+    # Consistent scenario ordering (if present)
+    scenario_order = [
+        ScenarioType.S1_NOMINAL.value,
+        ScenarioType.S2_DYNAMIC_DEMAND.value,
+        ScenarioType.S3_FAULT_DISTURBANCE.value,
+        ScenarioType.S4_SENSOR_BIAS.value,
+        ScenarioType.S5_MODEL_MISMATCH.value,
+    ]
+
+    def _short_s(s: str) -> str:
+        if isinstance(s, str) and s.startswith("S") and "_" in s:
+            return s.split("_", 1)[0]
+        return str(s)
+
+    def _method_sort_key(m: str) -> int:
+        k = str(m).lower()
+        if k.startswith("pid"):
+            return 0
+        if "linmpc" in k:
+            return 1
+        if "centralized" in k:
+            return 2
+        if "multi-agent" in k or "multiagent" in k:
+            return 3
+        if k.startswith("agenttwin"):
+            return 4
+        if "no shield" in k:
+            return 5
+        return 99
+
+    def _split_methods(methods: List[str]) -> Tuple[List[str], List[str]]:
+        learning: List[str] = []
+        classical: List[str] = []
+        for m in methods:
+            k = str(m).lower()
+            if k.startswith("pid") or ("linmpc" in k):
+                classical.append(m)
+            else:
+                learning.append(m)
+        learning = sorted(learning, key=_method_sort_key)
+        classical = sorted(classical, key=_method_sort_key)
+        return learning, classical
+
+    # Focus S2 as primary comparison scenario
+    s2 = all_df[all_df["scenario"] == ScenarioType.S2_DYNAMIC_DEMAND.value]
+    if s2.empty:
+        s2 = all_df
+
+    # ------------------------------------------------------------------
+    # Figure 1: Reward on S2 (split panels to keep RL readable)
+    # ------------------------------------------------------------------
+    stats_r = s2.groupby("method")["total_reward"].agg(["mean", "std", "count"]).copy()
+    stats_r = stats_r.sort_index()
+    methods_order = sorted(list(stats_r.index), key=_method_sort_key)
+    learning_methods, classical_methods = _split_methods(methods_order)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6), gridspec_kw={"height_ratios": [1.0, 1.0]})
+
+    def _bar(ax, methods: List[str], title: str, y_label: str, zoom: bool = False) -> None:
+        for i, m in enumerate(methods):
+            row = stats_r.loc[m]
+            st = _method_style(m)
+            y = float(row["mean"])
+            ystd = float(row["std"]) if float(row["count"]) > 1 else 0.0
+            ax.bar(
+                i,
+                y,
+                yerr=ystd,
+                capsize=3,
+                color=st["facecolor"],
+                edgecolor=st["edgecolor"],
+                hatch=st["hatch"],
+                linewidth=1.0,
+            )
+        ax.set_xticks(range(len(methods)))
+        ax.set_xticklabels(methods, rotation=20, ha="right")
+        ax.set_ylabel(y_label)
+        ax.set_title(title)
+        ax.grid(axis="y", linestyle=":", linewidth=0.6, color="0.85")
+
+        if zoom and len(methods) > 0:
+            vals = []
+            for m in methods:
+                row = stats_r.loc[m]
+                y = float(row["mean"])
+                ystd = float(row["std"]) if float(row["count"]) > 1 else 0.0
+                vals.extend([y - ystd, y + ystd])
+            vmin, vmax = float(np.min(vals)), float(np.max(vals))
+            rng = max(1e-6, vmax - vmin)
+            ax.set_ylim(vmin - 0.10 * rng, vmax + 0.10 * rng)
+
+    _bar(axes[0], learning_methods, "(a) Learning-based controllers (zoom)", r"Return $R$", zoom=True)
+    _bar(axes[1], classical_methods, "(b) Classical baselines", r"Return $R$", zoom=False)
+
+    plt.tight_layout()
+    _save_figure(plots_dir, "figure1_reward_S2")
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure 2: Safety + compute breakdown on S2
+    #   (a) violations  (symlog)
+    #   (b) shield activations (symlog)
+    #   (c) QP solve time when active (ms)
+    # ------------------------------------------------------------------
+    stats_v = s2.groupby("method")["violations"].agg(["mean", "std", "count"]).copy()
+    stats_a = s2.groupby("method")["shield_activations"].agg(["mean", "std", "count"]).copy()
+    tmp = s2.copy()
+    tmp["solve_ms_when_active"] = tmp["shield_solve_time_ms"] / tmp["shield_activations"].clip(lower=1)
+    stats_t = tmp.groupby("method")["solve_ms_when_active"].agg(["mean", "std", "count"]).copy()
+
+    methods = sorted(list(set(stats_v.index) | set(stats_a.index) | set(stats_t.index)), key=_method_sort_key)
+
+    fig, axes = plt.subplots(1, 3, figsize=(13.2, 4.2))
+
+    def _bar_nonneg(ax, stats_df: pd.DataFrame, methods: List[str], title: str, ylabel: str, symlog: bool = False) -> None:
+        for i, m in enumerate(methods):
+            if m not in stats_df.index:
+                continue
+            row = stats_df.loc[m]
+            st = _method_style(m)
+            y = float(row["mean"])
+            ystd = float(row["std"]) if float(row["count"]) > 1 else 0.0
+            yerr_low = min(ystd, max(0.0, y))
+            yerr = np.array([[yerr_low], [ystd]])
+            ax.bar(
+                i,
+                y,
+                yerr=yerr,
+                capsize=2,
+                color=st["facecolor"],
+                edgecolor=st["edgecolor"],
+                hatch=st["hatch"],
+                linewidth=1.0,
+            )
+        ax.set_xticks(range(len(methods)))
+        ax.set_xticklabels(methods, rotation=45, ha="right")
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.grid(axis="y", linestyle=":", linewidth=0.6, color="0.85")
+        if symlog:
+            ax.set_yscale("symlog", linthresh=1.0)
+
+    _bar_nonneg(axes[0], stats_v, methods, "(a) Violations", r"$N_{\mathrm{viol}}$ / episode", symlog=True)
+    _bar_nonneg(axes[1], stats_a, methods, "(b) Shield activations", r"$N_{\mathrm{shield}}$ / episode", symlog=True)
+    _bar_nonneg(axes[2], stats_t, methods, "(c) QP solve time", "Solve time when active (ms)", symlog=False)
+
+    plt.tight_layout()
+    _save_figure(plots_dir, "figure2_violations_S2")
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure 3: Scenario robustness (split panels)
+    # ------------------------------------------------------------------
+    scen_stats = (
+        all_df.groupby(["scenario", "method"])["total_reward"]
+        .agg([("mean", "mean"), ("std", "std"), ("count", "count")])
+        .reset_index()
+    )
+    scen_mean = scen_stats.pivot(index="scenario", columns="method", values="mean")
+    scen_std = scen_stats.pivot(index="scenario", columns="method", values="std")
+
+    keep = [s for s in scenario_order if s in scen_mean.index]
+    if keep:
+        scen_mean = scen_mean.reindex(keep)
+        scen_std = scen_std.reindex(keep)
+
+    methods = sorted(list(scen_mean.columns), key=_method_sort_key)
+    learning_methods, classical_methods = _split_methods(methods)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True, gridspec_kw={"height_ratios": [1.0, 1.0]})
+    x = np.arange(len(scen_mean.index))
+
+    def _line(ax, methods: List[str], title: str, zoom: bool = False) -> None:
+        for m in methods:
+            st = _method_style(m)
+            y = scen_mean[m].values
+            yerr = scen_std[m].values
+            ax.errorbar(
+                x,
+                y,
+                yerr=yerr,
+                label=m,
+                color=st["linecolor"],
+                linestyle=st["linestyle"],
+                marker=st["marker"],
+                linewidth=float(st["linewidth"]),
+                markersize=6,
+                capsize=3,
+            )
+        ax.set_title(title)
+        ax.set_ylabel(r"Return $R$")
+        ax.grid(axis="y", linestyle=":", linewidth=0.6, color="0.85")
+        if zoom and len(methods) > 0:
+            vals = []
+            for m in methods:
+                y = scen_mean[m].values
+                yerr = scen_std[m].values
+                vals.extend(list(y - yerr))
+                vals.extend(list(y + yerr))
+            vmin, vmax = float(np.min(vals)), float(np.max(vals))
+            rng = max(1e-6, vmax - vmin)
+            ax.set_ylim(vmin - 0.10 * rng, vmax + 0.10 * rng)
+
+    _line(axes[0], learning_methods, "(a) Learning-based controllers (zoom)", zoom=True)
+    _line(axes[1], classical_methods, "(b) Classical baselines", zoom=False)
+
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels([_short_s(s) for s in scen_mean.index])
+    axes[1].set_xlabel("Scenario")
+
+    # Legend: place in the top panel to save space
+    axes[0].legend(ncol=3, fontsize=9, loc="lower left")
+
+    plt.tight_layout()
+    _save_figure(plots_dir, "figure3_scenario_robustness")
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Figure 4: Fairness (Jain index) on S2
+    # ------------------------------------------------------------------
+    if "fairness_jain" in s2.columns:
+        stats_f = s2.groupby("method")["fairness_jain"].agg(["mean", "std", "count"]).copy()
+        methods = sorted(list(stats_f.index), key=_method_sort_key)
+
+        plt.figure(figsize=(11, 4))
+        for i, m in enumerate(methods):
+            row = stats_f.loc[m]
+            st = _method_style(m)
+            y = float(row["mean"])
+            ystd = float(row["std"]) if float(row["count"]) > 1 else 0.0
+            plt.bar(
+                i,
+                y,
+                yerr=ystd,
+                capsize=3,
+                color=st["facecolor"],
+                edgecolor=st["edgecolor"],
+                hatch=st["hatch"],
+                linewidth=1.0,
+            )
+        plt.xticks(range(len(methods)), methods, rotation=20, ha="right")
+        plt.ylabel("Jain fairness index (± std)")
+        plt.ylim(0.0, 1.05)
+        plt.title("Scenario S2: Multi-agent cost fairness (higher is better)")
+        plt.grid(axis="y", linestyle=":", linewidth=0.6, color="0.85")
+        plt.tight_layout()
+        _save_figure(plots_dir, "figure4_fairness_S2")
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # Figure 5: Scheduling adherence on S2 (optional)
+    # ------------------------------------------------------------------
+    if "demand_mismatch_seconds" in s2.columns:
+        stats_m = s2.groupby("method")["demand_mismatch_seconds"].agg(["mean", "std", "count"]).copy()
+        stats_s = s2.groupby("method")["mode_switches"].agg(["mean", "std", "count"]).copy()
+        methods = sorted(list(stats_m.index), key=_method_sort_key)
+
+        fig, axes = plt.subplots(1, 2, figsize=(13.2, 4.0))
+
+        def _bar_simple(ax, stats_df: pd.DataFrame, title: str, ylabel: str) -> None:
+            for i, m in enumerate(methods):
+                row = stats_df.loc[m]
+                st = _method_style(m)
+                y = float(row["mean"])
+                ystd = float(row["std"]) if float(row["count"]) > 1 else 0.0
+                yerr_low = min(ystd, max(0.0, y))
+                yerr = np.array([[yerr_low], [ystd]])
+                ax.bar(
+                    i,
+                    y,
+                    yerr=yerr,
+                    capsize=2,
+                    color=st["facecolor"],
+                    edgecolor=st["edgecolor"],
+                    hatch=st["hatch"],
+                    linewidth=1.0,
+                )
+            ax.set_xticks(range(len(methods)))
+            ax.set_xticklabels(methods, rotation=45, ha="right")
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.grid(axis="y", linestyle=":", linewidth=0.6, color="0.85")
+
+        _bar_simple(axes[0], stats_m, "(a) Demand mismatch", "Mismatch time (s) per episode")
+        _bar_simple(axes[1], stats_s, "(b) Mode switches", "Mode switches per episode")
+
+        plt.tight_layout()
+        _save_figure(plots_dir, "figure5_scheduling_S2")
+        plt.close(fig)
+
+
+def write_executive_summary(all_df: pd.DataFrame, out_path: Path) -> None:
+    lines: List[str] = []
+    lines.append("# AgentTwin Reproduction Summary\n")
+
+    for scen in sorted(all_df["scenario"].unique()):
+        df_s = all_df[all_df["scenario"] == scen]
+        means = df_s.groupby("method")["total_reward"].mean().sort_values(ascending=False)
+        lines.append(f"## {scen}: mean total reward (higher is better)\n")
+        for m, v in means.items():
+            lines.append(f"- {m}: {v:.2f}")
+        lines.append("")
+
+    out_path.write_text("\n".join(lines))
+
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate AgentTwin and generate tables/figures")
+    parser.add_argument("--config", type=str, default="configs/paper.yaml", help="Path to YAML config")
+    parser.add_argument("--artifacts_root", type=str, default="artifacts", help="Root directory containing seed_* subfolders")
+    parser.add_argument("--results_dir", type=str, default="results", help="Output directory")
     args = parser.parse_args()
-    
-    # Create results generator
-    generator = ResultsGenerator(output_dir=args.output_dir)
-    
-    logger.info("Starting comprehensive results generation...")
-    start_time = time.time()
-    
-    try:
-        # Run main experiments
-        if args.checkpoint_dir:
-            results = generator.run_evaluation_from_checkpoint(args.checkpoint_dir, quick=args.quick)
-        elif args.quick:
-            logger.info("Running quick evaluation...")
-            results = generator.run_main_experiments(quick=True)
-        else:
-            results = generator.run_main_experiments()
-        
-        # Perform statistical analysis
-        statistical_tests = generator.perform_statistical_analysis(results)
-        
-        # Generate publication plots
-        generator.generate_publication_plots(results, statistical_tests)
-        
-        # Generate results tables
-        generator.generate_results_tables(results, statistical_tests)
-        
-        # Save comprehensive results
-        generator.save_comprehensive_results(results, statistical_tests)
-        
-        total_time = time.time() - start_time
-        logger.info(f"Results generation completed in {total_time:.2f} seconds")
-        
-        print("\n" + "="*60)
-        print("EXPERIMENTAL RESULTS GENERATION COMPLETED")
-        print("="*60)
-        print(f"Output directory: {generator.output_dir}")
-        print(f"Total time: {total_time:.2f} seconds")
-        print("Plots generated: available publication-quality figures (skipping plots without data)")
-        print("Tables generated: available results tables")
-        print(f"Statistical tests: {len(statistical_tests)} comparisons")
-        print("="*60)
-        
-    except Exception as e:
-        logger.error(f"Results generation failed: {e}")
-        raise
+
+    cfg_dict = _load_yaml(Path(args.config))
+
+    seeds: List[int] = [int(x) for x in cfg_dict.get("experiment", {}).get("seeds", [0])]
+    n_eval_episodes = int(cfg_dict.get("experiment", {}).get("n_eval_episodes", 10))
+    scenario_set_name = str(cfg_dict.get("experiment", {}).get("scenario_set", "paper"))
+
+    env_cfg = cfg_dict.get("env", {})
+    base_cfg = TEPConfig(
+        seed=0,
+        tep_backend=env_cfg.get("tep_backend", "python"),
+        control_interval_sec=int(env_cfg.get("control_interval_sec", 6)),
+        scheduling_interval_sec=int(env_cfg.get("scheduling_interval_sec", 300)),
+        episode_length_sec=int(env_cfg.get("episode_length_sec", 8 * 3600)),
+        residual_max=float(env_cfg.get("residual_max", 10.0)),
+        warmup_sec=int(env_cfg.get("warmup_sec", 0)),
+        pi_update_interval_sec=int(env_cfg.get("pi_update_interval_sec", 1)),
+        use_safety_shield=bool(env_cfg.get("use_safety_shield", True)),
+        safety_shield_type=str(env_cfg.get("safety_shield_type", "qp")),
+    )
+    if "qp_shield" in env_cfg:
+        try:
+            base_cfg.qp_shield = base_cfg.qp_shield.__class__(**env_cfg["qp_shield"])
+        except Exception:
+            pass
+
+    # Optional reward shaping (incl. scheduling penalties)
+    rw = env_cfg.get("reward", {})
+    if isinstance(rw, dict):
+        for k, v in rw.items():
+            if hasattr(base_cfg.weights, str(k)):
+                try:
+                    setattr(base_cfg.weights, str(k), float(v))
+                except Exception:
+                    pass
+
+    artifacts_root = Path(args.artifacts_root)
+    results_dir = Path(args.results_dir)
+
+    raw_dir = _ensure_dir(results_dir / "raw")
+    tables_dir = _ensure_dir(results_dir / "tables")
+    plots_dir = _ensure_dir(results_dir / "plots")
+
+    all_rows: List[pd.DataFrame] = []
+
+    for seed in seeds:
+        seed_dir = artifacts_root / f"seed_{seed}"
+        if not seed_dir.exists():
+            print(f"[WARN] Missing artifacts for seed {seed}: {seed_dir}")
+            continue
+
+        models = _load_models_for_seed(seed_dir)
+        centralized: Optional[SAC] = models.get("centralized_sac")  # type: ignore
+        group_models: Optional[Dict[str, SAC]] = models.get("multiagent")  # type: ignore
+        scheduler: Optional[PPO] = models.get("scheduler_ppo")  # type: ignore
+
+        group_policy = _build_group_control_policy(group_models) if group_models else None
+
+        scenario_defs = get_scenario_set(
+            name=scenario_set_name,
+            seed=int(seed),
+            episode_length_sec=int(base_cfg.episode_length_sec),
+        )
+
+        for scen in scenario_defs:
+            # PID baseline (greedy demand scheduler + residual=0)
+            df_pid = evaluate_method_on_scenario(
+                method_name="PID (PI controller)",
+                base_cfg=base_cfg,
+                scenario=scen,
+                scheduler_policy=_greedy_demand_scheduler,
+                control_policy=lambda obs: np.zeros(12, dtype=np.float32),
+                n_episodes=n_eval_episodes,
+                seed_offset=seed * 10_000 + 100 * 0,
+                train_seed=int(seed),
+            )
+            all_rows.append(df_pid)
+
+            if centralized is not None:
+                df_c = evaluate_method_on_scenario(
+                    method_name="Centralized SAC",
+                    base_cfg=base_cfg,
+                    scenario=scen,
+                    scheduler_policy=_greedy_demand_scheduler,
+                    control_policy=lambda obs, m=centralized: np.asarray(m.predict(obs, deterministic=True)[0], dtype=np.float32),
+                    n_episodes=n_eval_episodes,
+                    seed_offset=seed * 10_000 + 100 * 1,
+                    train_seed=int(seed),
+                )
+                all_rows.append(df_c)
+
+            if group_policy is not None:
+                df_ma = evaluate_method_on_scenario(
+                    method_name="Multi-agent SAC",
+                    base_cfg=base_cfg,
+                    scenario=scen,
+                    scheduler_policy=_greedy_demand_scheduler,
+                    control_policy=group_policy,
+                    n_episodes=n_eval_episodes,
+                    seed_offset=seed * 10_000 + 100 * 2,
+                    train_seed=int(seed),
+                )
+                all_rows.append(df_ma)
+
+            if scheduler is not None and group_policy is not None:
+                df_at = evaluate_method_on_scenario(
+                    method_name="AgentTwin (Scheduler+MA)",
+                    base_cfg=base_cfg,
+                    scenario=scen,
+                    scheduler_policy=lambda obs, s=scheduler: int(s.predict(obs, deterministic=True)[0]),
+                    control_policy=group_policy,
+                    n_episodes=n_eval_episodes,
+                    seed_offset=seed * 10_000 + 100 * 3,
+                    train_seed=int(seed),
+                )
+                all_rows.append(df_at)
+
+                if bool(cfg_dict.get("evaluation", {}).get("include_ablation_no_shield", True)):
+                    cfg_no = TEPConfig(**{k: getattr(base_cfg, k) for k in base_cfg.__dataclass_fields__.keys()})
+                    cfg_no.use_safety_shield = False
+                    df_ns = evaluate_method_on_scenario(
+                        method_name="Ablation: no shield",
+                        base_cfg=cfg_no,
+                        scenario=scen,
+                        scheduler_policy=lambda obs, s=scheduler: int(s.predict(obs, deterministic=True)[0]),
+                        control_policy=group_policy,
+                        n_episodes=n_eval_episodes,
+                        seed_offset=seed * 10_000 + 100 * 4,
+                        train_seed=int(seed),
+                    )
+                    all_rows.append(df_ns)
+
+    if not all_rows:
+        raise RuntimeError("No results generated. Check artifacts_root and config seeds.")
+
+    all_df = pd.concat(all_rows, ignore_index=True)
+    all_df.to_csv(raw_dir / "all_episode_metrics.csv", index=False)
+
+    make_tables(all_df, tables_dir)
+    make_plots(all_df, plots_dir)
+    write_executive_summary(all_df, results_dir / "executive_summary.md")
+
+    print(f"Wrote results to: {results_dir}")
 
 
 if __name__ == "__main__":

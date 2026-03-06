@@ -1,11 +1,25 @@
-"""
-Environment package for Multi-Agent Digital Twin
+"""Gymnasium environments and scenario utilities for AgentTwin."""
 
-This package contains the Tennessee Eastman Process environment
-and related utilities for multi-agent reinforcement learning.
-"""
+from .tep_env import (
+    MV_GROUPS,
+    SafetyLimits,
+    RewardWeights,
+    TEPConfig,
+    TEPContinuousControlEnv,
+    TEPSchedulingEnv,
+    apply_scenario_to_config,
+)
+from .scenarios import ScenarioType, ScenarioDefinition, get_scenario_set
 
-from .tep_env import TEPEnvironment, TEPConfig, ProductionMode, ScenarioType
-
-__all__ = ['TEPEnvironment', 'TEPConfig', 'ProductionMode', 'ScenarioType']
-
+__all__ = [
+    "MV_GROUPS",
+    "SafetyLimits",
+    "RewardWeights",
+    "TEPConfig",
+    "TEPContinuousControlEnv",
+    "TEPSchedulingEnv",
+    "ScenarioType",
+    "ScenarioDefinition",
+    "get_scenario_set",
+    "apply_scenario_to_config",
+]

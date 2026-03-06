@@ -1,0 +1,37 @@
+experiment:
+  name: paper_strong
+  # Stronger statistics (more seeds, more eval episodes). Adjust to your resources.
+  seeds: [0, 1, 2, 3, 4]
+  n_eval_episodes: 20
+  scenario_set: paper
+
+env:
+  tep_backend: python   # python | fortran (if compiled)
+  control_interval_sec: 6
+  scheduling_interval_sec: 300
+  episode_length_sec: 28800   # 8 hours
+  residual_max: 10.0
+  warmup_sec: 0
+  pi_update_interval_sec: 1
+  use_safety_shield: true
+  safety_shield_type: qp
+
+  # Reward shaping / scheduling penalties
+  reward:
+    demand_mismatch: 5.0
+    mode_switch: 0.10
+
+training:
+  controller:
+    train_centralized: true
+    train_multi_agent: true
+    # Total SAC steps per controller (each group model gets this many steps)
+    sac_steps: 2000000
+    rounds: 5
+  scheduler:
+    enabled: true
+    ppo_steps: 1000000
+
+evaluation:
+  include_ablation_no_shield: true
+  save_episode_traces: false
