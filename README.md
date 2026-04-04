@@ -6,7 +6,7 @@ This repository provides a **fully reproducible** experimental pipeline for the 
 
 AgentTwin integrates three components:
 
-- **Slow-time scheduling (discrete):** a PPO policy selects the operating mode \(m_k \in \{1,\dots,6\}\) every \(T_s = 300\) s.
+- **Slow-time scheduling (discrete):** a PPO policy selects the operating mode (m_k \in {1,...,6}) every (T_s = 300) s.
 - **Fast-time regulatory control (continuous):** residual controllers (centralized SAC or **multi-agent SAC**) adjust manipulated variables every \(T_c = 6\) s **on top of** the benchmark decentralized PI controller shipped with the TEP simulator.
 - **Solver-backed safety layer:** a **QP projection shield** (OSQP) filters residual actions and falls back to a conservative safe action if the projection is infeasible or fails.
 
