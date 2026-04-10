@@ -1,4 +1,4 @@
-# AgentTwin
+# AgentTwin for TEP
 **Agentic digital-twin testbed for integrated scheduling and regulatory control on the Tennessee Eastman Process (TEP)**
 ![agenttwin_graphical_abstract_generated (1)](https://github.com/user-attachments/assets/80283cd6-640a-4732-86e5-4457f6092cbf)
 
