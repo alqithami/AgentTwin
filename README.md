@@ -1,4 +1,8 @@
 # AgentTwin for TEP
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![JPC](https://img.shields.io/badge/JPC-2026.xxxxxx-b31b1b.svg)](https://www.sciencedirect.com/journal/journal-of-process-control)
+
 **Agentic digital-twin testbed for integrated scheduling and regulatory control on the Tennessee Eastman Process (TEP)**
 ![agenttwin_graphical_abstract_generated (1)](https://github.com/user-attachments/assets/80283cd6-640a-4732-86e5-4457f6092cbf)
 
