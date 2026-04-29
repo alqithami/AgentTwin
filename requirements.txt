@@ -6,7 +6,7 @@ numpy>=1.24.0
 pandas>=2.0.0
 scipy>=1.10.0
 
-# Plotting (B/W figures with single accent color)
+# Plotting
 matplotlib>=3.7.0
 
 # RL stack
@@ -14,10 +14,10 @@ torch>=2.0.0
 stable-baselines3[extra]>=2.0.0
 gymnasium>=0.29.0
 
-# QP-based safety shield (OSQP)
+# QP-based safety shield
 osqp>=0.6.3
 
-# Config parsing
+# Configuration parsing
 PyYAML>=6.0.1
 
 # Utilities
