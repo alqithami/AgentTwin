@@ -2,27 +2,29 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it."
 title: "AgentTwin: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield"
 abstract: >
-  AgentTwin is a learning-safe multi-agent control framework for the Tennessee Eastman (TE)
-  process. It couples a lightweight digital twin with a runtime safety shield and provides
-  full reproduction scripts for figures and tables reported in the manuscript.
+  AgentTwin is a reproducible simulation-based digital-twin testbed and
+  multi-agent residual-control framework for the Tennessee Eastman Process.
+  It couples supervisory operating-mode scheduling, residual SAC regulatory
+  control, and a solver-backed QP safety shield.
 authors:
   - family-names: Alqithami
     given-names: Saad
 repository-code: "https://github.com/alqithami/AgentTwin"
 url: "https://github.com/alqithami/AgentTwin"
 license: MIT
-date-released: 2025-08-19
+date-released: 2026-04-27
 keywords:
   - reinforcement learning
   - digital twin
-  - Tennessee Eastman
+  - Tennessee Eastman Process
   - process control
-  - safety shielding
-  - multi-agent systems
+  - safety filtering
+  - multi-agent reinforcement learning
 preferred-citation:
-  type: software
-  title: "Multi-Agent Digital Twin for Joint Scheduling and Control on the Tennessee Eastman Process (software)"
+  type: article
+  title: "AgentTwin: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield"
   authors:
     - family-names: Alqithami
       given-names: Saad
-  url: "https://github.com/alqithami/AgentTwin"
+  journal: "Journal of Process Control"
+  year: 2026
