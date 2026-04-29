@@ -1,0 +1,7 @@
+Method,Return rate (per h),Violation rate (s/h),Survival (min),Shutdown rate (%)
+PI,-3590.7 \pm 471.6,267.7 \pm 265.1,222.8 \pm 64.7,99.0 \pm 2.2
+LinMPC,-93460.1 \pm 6102.4,22.8 \pm 16.8,8.2 \pm 0.8,100.0 \pm 0.0
+C-SAC,-290664.7 \pm 120016.6,42.3 \pm 34.5,3.0 \pm 1.6,100.0 \pm 0.0
+MA-SAC,-369285.0 \pm 75434.3,55.3 \pm 49.3,2.0 \pm 0.5,100.0 \pm 0.0
+NoShield,-369285.2 \pm 75433.7,55.3 \pm 49.3,2.0 \pm 0.5,100.0 \pm 0.0
+AgentTwin,-369285.0 \pm 75434.3,55.3 \pm 49.3,2.0 \pm 0.5,100.0 \pm 0.0

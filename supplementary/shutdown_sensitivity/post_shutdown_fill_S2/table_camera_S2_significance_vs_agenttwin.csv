@@ -1,0 +1,16 @@
+Comparator,Metric,Mean difference,Welch p
+MA-SAC,Return rate,0.000,1.0000
+MA-SAC,Violation rate,0.000,1.0000
+MA-SAC,Survival (min),0.000,1.0000
+C-SAC,Return rate,-78620.204,0.2564
+C-SAC,Violation rate,12.972,0.6442
+C-SAC,Survival (min),-0.948,0.2625
+NoShield,Return rate,0.279,1.0000
+NoShield,Violation rate,0.000,1.0000
+NoShield,Survival (min),0.000,1.0000
+PI,Return rate,-365694.278,0.0004
+PI,Violation rate,-212.474,0.1483
+PI,Survival (min),-220.771,0.0016
+LinMPC,Return rate,-275824.803,0.0012
+LinMPC,Violation rate,32.432,0.2235
+LinMPC,Survival (min),-6.207,0.0000

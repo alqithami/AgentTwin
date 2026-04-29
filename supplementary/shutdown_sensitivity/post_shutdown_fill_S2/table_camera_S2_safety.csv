@@ -1,0 +1,7 @@
+Method,Npre per ep,Activations per h,Solve time ms per ep,Solve time ms per act (pooled)
+PI,1237.6 \pm 1476.1,279.1 \pm 277.8,27.99 \pm 33.07,0.0226
+LinMPC,2.8 \pm 2.7,19.7 \pm 18.7,0.07 \pm 0.07,0.0252
+C-SAC,1.0 \pm 1.5,20.3 \pm 32.4,0.04 \pm 0.05,0.0373
+MA-SAC,1.2 \pm 2.6,24.6 \pm 54.9,0.04 \pm 0.08,0.0303
+NoShield,0.0 \pm 0.0,0.0 \pm 0.0,0.00 \pm 0.00,0.0000
+AgentTwin,1.2 \pm 2.6,24.6 \pm 54.9,0.03 \pm 0.07,0.0282

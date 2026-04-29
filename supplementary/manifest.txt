@@ -1,0 +1,11 @@
+Supplementary Material: Auxiliary evaluation tables for AgentTwin
+
+Contents:
+1. matched_reset_reevaluation/
+   Auxiliary tables for matched-reset reevaluation on the main reported setup.
+2. pi_shield_sensitivity/
+   PI shield-on and shield-off sensitivity tables.
+3. shutdown_sensitivity/
+   Evaluation-only terminal-penalty and post-shutdown-fill sensitivity tables.
+
+Tables are provided in both LaTeX (.tex) and comma-separated (.csv) forms where applicable.

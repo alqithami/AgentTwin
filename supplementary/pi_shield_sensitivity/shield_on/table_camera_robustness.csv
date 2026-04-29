@@ -1,0 +1,3 @@
+Scenario,Method,Return rate,Violation rate,Survival (min),Shutdown rate (%)
+S2,PI,-1453.1 \pm 723.8,267.7 \pm 265.1,222.8 \pm 64.7,99.0 \pm 2.2
+S5,PI,-3586.3 \pm 251.0,338.4 \pm 102.2,9.1 \pm 0.8,100.0 \pm 0.0
