@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it."
-title: "Multi-Agent Digital Twin for Joint Scheduling and Control on the Tennessee Eastman Process"
+title: "AgentTwin: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield"
 abstract: >
   AgentTwin is a learning-safe multi-agent control framework for the Tennessee Eastman (TE)
   process. It couples a lightweight digital twin with a runtime safety shield and provides
