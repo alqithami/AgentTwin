@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![JPC](https://img.shields.io/badge/JPC-2026.xxxxxx-b31b1b.svg)](https://www.sciencedirect.com/journal/journal-of-process-control)
 
-**AgentTwin}: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield**
+**AgentTwin: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield**
 ![agenttwin_graphical_abstract_generated (1)](https://github.com/user-attachments/assets/80283cd6-640a-4732-86e5-4457f6092cbf)
 
 This repository provides a **fully reproducible** experimental pipeline for the *AgentTwin* architecture described in the accompanying Journal of Process Control manuscript. The codebase is designed for **fair, auditable comparisons** of learning-based and classical controllers on a simulation-based digital twin of the **Tennessee Eastman Process (TEP)**.
