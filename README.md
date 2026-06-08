@@ -1,7 +1,7 @@
 # AgentTwin for TEP
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![JPC](https://img.shields.io/badge/JPC-2026.xxxxxx-b31b1b.svg)](https://www.sciencedirect.com/journal/journal-of-process-control)
+[![JPC](https://img.shields.io/badge/JPC-10.1016/j.jprocont.2026.103735-b31b1b.svg)](https://linkinghub.elsevier.com/retrieve/pii/S0959152426001186)
 
 **AgentTwin: a multi-agent digital-twin testbed for supervisory operating-mode scheduling and residual regulatory control on the Tennessee Eastman Process with a solver-backed safety shield**
 ![agenttwin_graphical_abstract_generated (1)](https://github.com/user-attachments/assets/80283cd6-640a-4732-86e5-4457f6092cbf)
